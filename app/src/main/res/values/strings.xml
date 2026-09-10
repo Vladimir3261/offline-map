@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="save_failed">Could not save trip · storage full?</string>
+    <string name="trip_distances">%1$s driven  /  %2$s remaining</string>
+    <string name="calculating">Calculating…</string>
+    <string name="calculate">Calculate</string>
+</resources>
