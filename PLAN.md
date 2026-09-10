@@ -1,6 +1,6 @@
 # RouteOdo implementation plan and decisions
 
-Updated 10 September 2026. README.md describes the app; API.md is the current firmware contract.
+Updated 11 September 2026. README.md describes the app; API.md is the current firmware contract.
 
 ## Confirmed design
 
@@ -9,10 +9,11 @@ Updated 10 September 2026. README.md describes the app; API.md is the current fi
 - Photon street-address lookup, optional GPS starting point, and locally saved Home/Work/custom places.
 - OSRM driving routes calculated online and saved locally. A real Kyiv route is bundled for first-use testing.
 - Progress is distance along the chosen route, assuming the driver follows it. Geometry supplies the calculated coordinate and route bearing.
+- Fullscreen driving overlays, a separate Services screen, bundled day/night styles, and a route-bearing chevron with independent raw GPS dot/accuracy circle.
 - The car provides metre-resolution odometer anchors and speed, plus acquisition timestamps and a runtime epoch. No car-side navigation sessions, coordinates, heading, or VIN.
 - LAN-first authenticated GET/SSE transport, one-second LAN timeout, public fallback, and 500 ms polling fallback when streaming is unavailable.
 - Start/Stop route controls a navigation session entirely in the app.
-- Manual GPS Sync and Undo change alignment. The independent raw GPS debug marker merges visually with the calculated marker within 50 m.
+- Manual GPS Sync and Undo change alignment. The independent raw GPS debug marker remains independent at every distance; an overlap ring keeps both sources visible.
 
 ## Calculation and persistence
 
@@ -25,6 +26,8 @@ The route, local session, epoch/baseline, confirmed and displayed distances, gap
 Older saved counter formats retain route/alignment where possible but require a fresh navigation baseline. The bundled Berlin example migrates to Kyiv.
 
 ## Current delivery
+
+Version 0.4 reorganizes presentation while preserving the 0.3 car transport, odometer engine, GPS Sync/Undo, and offline storage. See docs/DRIVING_UI.md for the control inventory and display semantics.
 
 1. Address/GPS/saved-place route preparation and persisted driving geometry.
 2. Firmware JSON/SSE integration, local navigation sessions, epoch gaps, interpolation, staleness, and calibration.

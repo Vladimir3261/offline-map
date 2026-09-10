@@ -2,18 +2,28 @@
 
 Android navigation along a selected driving route using the vehicle odometer, assuming the driver follows that route. GPS is optional: it can be displayed for comparison or explicitly used to correct the alignment. Android 8.0+ (API 26), Kotlin, MapLibre, and OpenStreetMap data.
 
-Version **0.3.0** adds address search, saved places, a current-GPS starting point, a Kyiv example, offline Kyiv downloads, and navigation sessions managed entirely on the device. The car feed supplies metre-resolution odometer anchors, speed, and a runtime epoch; see [API.md](API.md). It has no navigation sessions.
+Version **0.4.0** adds a fullscreen driving interface, bundled day/night maps, a directional calculated-position chevron, and an independent raw GPS dot with an accuracy circle. All car transport and positioning behavior from 0.3 is retained. [UI design and preserved flows](docs/DRIVING_UI.md).
+
+## Driving screen and Services
+
+The map fills the screen behind a large maneuver card, a compact GPS comparison, and the speed/source/remaining-distance panel. The blue route has a dark outline; its travelled portion is muted. Follow uses calculated route bearing at a 48° tilt. Dragging, rotating, or pinching the map suspends follow; **Recenter** restores it. GPS never controls the follow camera.
+
+**Services** opens a separate screen with **Back to map** at the top. All prior controls remain available there: Route & saved places, Start/Stop route, GPS Sync/Undo, Align & calibration, API & connection, Retry, API diagnostics, Offline & online maps, Position details / Show both, Appearance, and Preview with its slider/Drive/±100 m controls. Map long-press start/destination/alignment selection still works.
+
+Choose **Services → Appearance → System / Day / Night**. The choice persists locally. Styles and new application icons are bundled with the APK. Existing map pack identities and their resource manifests are retained, so day/night appearance shares the same offline tile/font storage. Neither style needs a RouteOdo style server.
+
+The source label **ODO + GPS** means odometer positioning with live GPS displayed for comparison; it does not mean automatic GPS correction. **GPS stale**, **CAR OFFLINE**, **API CONNECTING**, and **PREVIEW** are explicit states. Unknown/stale speed shows a dash. Preview speed is simulated and labeled as such.
 
 ## Plan and test a real route
 
 1. Install the latest debug APK over the existing app. On first use, the map shows a real 6.1 km Kyiv driving route from the railway station area to Podil. Updating an old Berlin demo switches it to Kyiv; your own saved route is retained.
-2. Choose **Route → Plan route / saved places**. Type a street, number, and city for **A**, press Search, and select the matching result. For example: `Хрещатик 22, Київ`. You can instead use **Use current GPS for A** or pick a previously saved place.
+2. Choose **Services → Route & saved places → Plan route / saved places**. Type a street, number, and city for **A**, press Search, and select the matching result. For example: `Хрещатик 22, Київ`. You can instead use **Use current GPS for A** or pick a previously saved place.
 3. Search for **B** and select it. For example: `Володимирська 60, Київ`. Search results include the full address so you can distinguish matching streets in different cities. Search supports local names and Latin spellings; coverage depends on OpenStreetMap.
 4. Press **Calculate route** and review it on the map. Route calculation uses real road geometry and driving maneuvers. The app saves the route automatically.
-5. Open **API**, enter your bearer token, and keep the prefilled public endpoint and **Try car LAN first** enabled. At the route start, press **Start route**. It obtains a fresh reading and begins a local navigation session at route distance zero. Connecting the API alone does not move the marker.
+5. Open **Services → API & connection**, enter your bearer token, and keep the prefilled public endpoint and **Try car LAN first** enabled. At the route start, press **Services → Start route**. It obtains a fresh reading and begins a local navigation session at route distance zero. Connecting the API alone does not move the marker.
 6. Keep the app in the foreground. Odometer increases move the green marker and update the next-turn display. **Stop route** ends navigation; Start route again establishes a new baseline. A running session resumes across app restarts. Reconnection in the same car epoch catches up from the odometer; a car runtime restart rebases and marks a distance gap.
 
-You can inspect any calculated route without the vehicle: choose **API → Preview**, then use Drive, the slider, or +100 m. The PREVIEW badge distinguishes simulated movement from the actual odometer feed. Planning a real route does not require using the simulator.
+You can inspect any calculated route without the vehicle: open **Services → Preview**, then use Drive, the slider, or +100 m. The PREVIEW badge distinguishes simulated movement from the actual odometer feed. Planning a real route does not require using the simulator.
 
 Long-pressing the map still offers **Set route start**, **Set destination**, and **Align marker here**. **Align** accepts metres along the route and a calibration multiplier from 0.5 to 1.5. API mode requires a started route and a fresh odometer reading for alignment.
 
@@ -27,7 +37,7 @@ Names, addresses, and coordinates stay on the device across app restarts and upd
 
 The map normally loads and caches data automatically over the internet. You do not need to download Kyiv before browsing it. These are map-data updates from the provider, not traffic updates or immediate propagation of every OpenStreetMap edit.
 
-**Maps** provides two independent downloads:
+**Services → Offline & online maps** provides two independent downloads:
 
 | Pack | Coverage | Detail |
 | --- | --- | --- |
@@ -59,11 +69,11 @@ See [API.md](API.md) for the exact JSON contract, calculations, error behavior, 
 Allow **precise location while using the app** to see GPS debugging. The app uses the device's GNSS provider while foregrounded and stops the subscription when backgrounded. No background-location permission is requested. Denying location permission leaves odometer navigation available.
 
 - **Blue:** the reported GPS coordinate, without snapping to a road.
-- **Dark green:** the calculated position along the route.
-- **50 m apart or closer:** one marker at the calculated position with a blue ring. This affects display only.
+- **Directional chevron:** the calculated position, rotated to the route bearing.
+- **Blue dot and accuracy circle:** always at the fresh raw GPS coordinate, even within 50 m. An expanded blue ring remains visible under the chevron when their screen footprints overlap. A subtle line connects separated markers.
 - **Older than five seconds:** GPS is hidden and marked stale until a fresh fix returns.
 
-The comparison strip shows separation and GPS accuracy. Tap it for both coordinates and **Show both**, which fits both markers on screen. Follow returns the camera to the calculated position. Reported accuracy does not change the 50 m display threshold.
+The comparison card shows separation and GPS accuracy in real time. Tap it for both coordinates and **Show both**, which fits both markers on screen. Follow returns the camera to the calculated position. Reported accuracy never changes either coordinate. There is no geographic merge threshold.
 
 **GPS Sync** uses an independent fresh GPS request and shows a route-alignment preview. Choose the intended route occurrence at crossings or loops, then Apply sync. Distance driven while the preview is open is retained. No correction happens automatically.
 
@@ -81,7 +91,7 @@ Default services need no API keys for light personal testing:
 - [OSRM](https://project-osrm.org/docs/v5.24.0/api/) for driving routes. Its public server is for testing and community use.
 - [OpenFreeMap](https://openfreemap.org/) for the OpenStreetMap-derived vector map, rendered by [MapLibre Native](https://maplibre.org/maplibre-native/android/api/).
 
-Change Photon and OSRM base URLs under **Route → Plan route / saved places → Search and route service settings**. Use suitable hosted or self-managed services before wider deployment. Odometer credentials are not sent to these services. OpenStreetMap attribution remains available on the map and in the address form.
+Change Photon and OSRM base URLs under **Services → Route & saved places → Plan route / saved places → Search and route service settings**. Use suitable hosted or self-managed services before wider deployment. Odometer credentials are not sent to these services. OpenStreetMap attribution remains available on the map and in the address form.
 
 Use Android Studio with JDK 17 and SDK 36, or:
 
@@ -94,9 +104,11 @@ Enter the bearer token through the API screen. Tokens are encrypted using an And
 
 ## Verification and remaining scope
 
-The 36 unit and HTTP tests cover odometer baselines, nullable startup samples, epoch rebasing and gap markers, server-time staleness, interpolation and monotonic holds, calibration, GPS rollback across epoch changes, authentication retry latching, SSE and polling fallback, saved places, stale search selections, actual Ukrainian address parsing, query encoding/caching, route geometry, persistence, and the 50 m GPS display threshold. The included Kyiv route and address fixture were obtained from OSRM and Photon on 10 September 2026.
+The unit and HTTP tests cover odometer baselines, nullable startup samples, epoch rebasing and gap markers, server-time staleness, interpolation and monotonic holds, calibration, GPS rollback across epoch changes, authentication retry latching, SSE and polling fallback, saved places, stale search selections, actual Ukrainian address parsing, query encoding/caching, route geometry, persistence, independent GPS display/staleness, appearance persistence, and gesture/follow camera state. The included Kyiv route and address fixture were obtained from OSRM and Photon on 10 September 2026.
 
-On a phone/tablet, verify: address selection and GPS start; saved Home/Work after restart; Start route with the real odometer; stationary values; network loss/recovery; GPS Sync and Undo after movement; both offline packs; and a cold launch without internet after downloads report ready. Native map downloads, GPS hardware, and the new screen flows still need this device validation.
+Android 15 emulator checks cover an in-place upgrade with the old route pack, offline day/night rendering, independent and overlapping GPS markers, stale GPS, camera fitting, Services safe areas, and portrait/landscape Preview driving. See [driving UI notes](docs/DRIVING_UI.md).
+
+On your phone/tablet, verify: address selection and GPS start; saved Home/Work after restart; Start route with the real odometer; stationary values; network loss/recovery; GPS Sync and Undo after movement; both offline packs; portrait/landscape layouts; independent markers and recenter; and a cold launch without internet after downloads report ready. Real GPS hardware, Pi connectivity, and driving behavior still need validation on your phone/tablet and BMW.
 
 This version has English controls and maneuver text, with native road names. Voice guidance, background navigation, fully offline route calculation, offline address indexing, traffic information, and automatic deviation detection are not implemented.
 

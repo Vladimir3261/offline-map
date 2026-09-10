@@ -30,6 +30,8 @@ import android.view.WindowManager
 import android.widget.*
 import dev.routeodo.core.*
 import dev.routeodo.data.*
+import dev.routeodo.ui.*
+import android.content.res.Configuration
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.json.JSONObject
 import org.maplibre.android.MapLibre
@@ -52,11 +54,11 @@ import java.util.concurrent.Executors
 import kotlin.math.*
 
 class MainActivity : Activity() {
-    private val ink = Color.rgb(23, 49, 42)
-    private val green = Color.rgb(22, 116, 86)
-    private val gpsBlue = Color.rgb(29, 105, 222)
-    private val paper = Color.rgb(244, 245, 238)
-    private val muted = Color.rgb(95, 113, 105)
+    private var palette = DrivingPalette(false)
+    private val ink get() = palette.text
+    private val green get() = palette.accent
+    private val paper get() = palette.background
+    private val muted get() = palette.secondary
     private val handler = Handler(Looper.getMainLooper())
     private val workers = Executors.newFixedThreadPool(2)
     private val disk = Executors.newSingleThreadExecutor()
@@ -89,7 +91,18 @@ class MainActivity : Activity() {
     private var live = false
     private var simMeters = 0.0
     private var simRunning = false
-    private var follow = false
+    private val followState = FollowState()
+    private var follow: Boolean
+        get() = followState.enabled
+        set(value) { if (value) followState.recenter() else followState.browse() }
+    private lateinit var appearance: AppearanceSettings
+    private lateinit var drivingUi: DrivingUi
+    private var drivingMap: DrivingMap? = null
+    private var servicePanel: ServicePanel? = null
+    private var mapSummary = "Checking saved maps…"
+    private var currentFeedText = ""
+    private var mapPadding = intArrayOf(0, 0, 0, 0)
+    private var saveError: String? = null
     private var active = false
     private var polling = false
     private var generation = 0
@@ -106,25 +119,12 @@ class MainActivity : Activity() {
     private var selectedStart: Coordinate? = null
     private var selectedEnd: Coordinate? = null
     private var gpsPending = false
-    private lateinit var turnText: TextView
-    private lateinit var turnDistance: TextView
-    private lateinit var tripText: TextView
-    private lateinit var feedText: TextView
-    private lateinit var debugText: TextView
-    private lateinit var mapText: TextView
-    private lateinit var modeText: TextView
-    private lateinit var simPanel: LinearLayout
-    private lateinit var seek: SeekBar
-    private lateinit var playButton: Button
-    private lateinit var startButton: Button
-    private lateinit var gpsButton: Button
-    private lateinit var undoButton: Button
-    private lateinit var followButton: Button
-    private lateinit var root: LinearLayout
-
     private val progressMeters: Double get() = if (live) tracker.state.progressMeters else simMeters
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        appearance = AppearanceSettings(this)
+        palette = DrivingPalette(appearance.night(this))
+        setTheme(if (palette.night) R.style.AppThemeNight else R.style.AppTheme)
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         if (Build.VERSION.SDK_INT >= 30) window.setDecorFitsSystemWindows(false)
@@ -175,7 +175,16 @@ class MainActivity : Activity() {
         mapView.getMapAsync { ready ->
             map = ready
             ready.uiSettings.isLogoEnabled = false
-            ready.uiSettings.setAttributionMargins(dp(8), 0, 0, dp(8))
+            ready.uiSettings.setCompassImage(getDrawable(if (palette.night) R.drawable.ic_compass_night else R.drawable.ic_compass_day)!!)
+            ready.uiSettings.setCompassMargins(0, dp(210), dp(16), 0)
+            // The SDK labels both compass clicks and our follow transitions as API animations.
+            // Observe compass touch directly; map gestures are handled by DrivingMap.
+            mapView.findViewWithTag<View>("compassView")?.setOnTouchListener { _, event ->
+                if (event.actionMasked == android.view.MotionEvent.ACTION_DOWN) { follow = false; render() }
+                false
+            }
+            ready.setPadding(mapPadding[0], mapPadding[1], mapPadding[2], mapPadding[3])
+            drivingMap = DrivingMap(this, ready, followState) { render() }
             ready.addOnMapLongClickListener { p -> selectPoint(Coordinate(p.latitude, p.longitude)); true }
             loadMapStyle(true)
         }
@@ -232,183 +241,130 @@ class MainActivity : Activity() {
                 .put("undoSimBefore", savedUndoBefore).put("undoSimAfter", savedUndoAfter)
             store.write(json)
         }.onFailure {
-            handler.post { if (!isDestroyed) feedText.setText(R.string.save_failed) }
+            handler.post { if (!isDestroyed) { saveError = getString(R.string.save_failed); render() } }
         } }
     }
 
     private fun buildUi(savedInstanceState: Bundle?) {
-        root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(paper) }
-        root.setOnApplyWindowInsetsListener { view, insets ->
-            val bars = insets.systemWindowInsetTop
-            view.setPadding(insets.systemWindowInsetLeft, bars, insets.systemWindowInsetRight, insets.systemWindowInsetBottom)
-            insets
-        }
-        setContentView(root)
-        val heading = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(18), dp(8), dp(18), 0) }
-        heading.addView(label("RouteOdo", 24f, ink, true), LinearLayout.LayoutParams(0, dp(36), 1f))
-        modeText = label("SIMULATOR", 11f, green, true)
-        heading.addView(modeText)
-        root.addView(heading)
-        val toolbar = row()
-        toolbar.addWeighted(button("Route") { routeMenu() })
-        toolbar.addWeighted(button("API") { feedSettings() })
-        toolbar.addWeighted(button("Maps") { mapsMenu() })
-        toolbar.addWeighted(button("Align") { alignDialog() })
-        root.addView(toolbar)
-
-        val guidance = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(18), dp(12), dp(18), dp(12))
-            setBackgroundColor(ink)
-        }
-        turnDistance = label("—", 29f, Color.rgb(216, 247, 140), true)
-        turnText = label("Select a route", 17f, Color.WHITE, true).apply { maxLines = 2 }
-        tripText = label("", 12f, Color.rgb(201, 219, 209))
-        guidance.addView(turnDistance); guidance.addView(turnText); guidance.addView(tripText)
-        root.addView(guidance)
-
         mapView = MapView(this)
         mapView.onCreate(savedInstanceState)
-        root.addView(mapView, LinearLayout.LayoutParams(-1, 0, 1f))
-        mapText = label("Map not downloaded", 11f, muted).apply { setPadding(dp(16), dp(3), dp(16), dp(2)) }
-        root.addView(mapText)
-        debugText = label("", 12f, ink, true).apply {
-            setPadding(dp(16), dp(4), dp(16), dp(4)); minHeight = dp(44)
-            gravity = Gravity.CENTER_VERTICAL
-            setOnClickListener { debugMenu() }
-            contentDescription = "GPS and calculated position comparison. Tap for details and show both on map."
-        }
-        root.addView(debugText)
-        feedText = label("", 12f, green, true).apply { setPadding(dp(16), dp(3), dp(16), dp(3)); maxLines = 2 }
-        root.addView(feedText)
-        val actions = row()
-        startButton = button("Start route") { if (live && tracker.state.running) stopRoute() else startRoute() }
-        gpsButton = button("GPS Sync") { startGpsSync() }
-        undoButton = button("Undo Sync") { undoSync() }
-        followButton = button("Follow") { follow = !follow; render() }
-        actions.addWeighted(startButton); actions.addWeighted(gpsButton); actions.addWeighted(undoButton); actions.addWeighted(followButton)
-        root.addView(actions)
-        simPanel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), 0, dp(12), dp(8)) }
-        seek = SeekBar(this).apply { max = 10_000; contentDescription = "Simulated progress along route" }
-        seek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: SeekBar?, value: Int, fromUser: Boolean) {
-                if (fromUser) { simMeters = route.lengthMeters * value / 10_000.0; clearUndo(); render() }
-            }
-            override fun onStartTrackingTouch(seekBar: SeekBar?) { simRunning = false }
-            override fun onStopTrackingTouch(seekBar: SeekBar?) { persist() }
+        drivingUi = DrivingUi(this, mapView, services = { showServices() }, recenter = {
+            follow = true; render()
+        }, compare = { debugMenu() }, mapInsets = { left, top, right, bottom ->
+            mapPadding = intArrayOf(left, top, right, bottom)
+            map?.setPadding(left, top, right, bottom)
+            map?.uiSettings?.setAttributionMargins(dp(8), 0, 0, dp(8))
         })
-        simPanel.addView(seek)
-        val controls = row()
-        controls.addWeighted(button("−100 m") { simMeters = (simMeters - 100).coerceAtLeast(0.0); clearUndo(); render(); persist() })
-        playButton = button("▶  Drive") { simRunning = !simRunning; follow = true; render() }
-        controls.addWeighted(playButton)
-        controls.addWeighted(button("+100 m") { simMeters += 100; render(); persist() })
-        simPanel.addView(controls)
-        root.addView(simPanel)
+        setContentView(drivingUi)
+        applyAppearance(reloadMap = false)
     }
 
-    private fun drawRoute() {
-        val style = map?.style ?: return
-        val line = LineString.fromLngLats(route.points.map { Point.fromLngLat(it.longitude, it.latitude) })
-        if (style.getSourceAs<GeoJsonSource>("route") == null) {
-            style.addSource(GeoJsonSource("route", line))
-            style.addLayer(LineLayer("route-halo", "route").withProperties(lineColor(Color.WHITE), lineWidth(10f)))
-            style.addLayer(LineLayer("route-line", "route").withProperties(lineColor(green), lineWidth(6f)))
-            style.addSource(GeoJsonSource("route-gaps", FeatureCollection.fromFeatures(emptyList())))
-            style.addLayer(CircleLayer("route-gap-dots", "route-gaps").withProperties(circleRadius(7f), circleColor(Color.rgb(221, 125, 32)), circleStrokeColor(Color.WHITE), circleStrokeWidth(2f)))
-            style.addSource(GeoJsonSource("gps-position", FeatureCollection.fromFeatures(emptyList())))
-            style.addLayer(CircleLayer("gps-dot", "gps-position").withProperties(circleRadius(10f), circleColor(gpsBlue), circleStrokeColor(Color.WHITE), circleStrokeWidth(3f)))
-            style.addSource(GeoJsonSource("position", Point.fromLngLat(route.points.first().longitude, route.points.first().latitude)))
-            style.addLayer(CircleLayer("position-halo", "position").withProperties(circleRadius(15f), circleColor(Color.WHITE)))
-            style.addLayer(CircleLayer("position-dot", "position").withProperties(circleRadius(10f), circleColor(ink), circleStrokeColor(Color.rgb(216, 247, 140)), circleStrokeWidth(3f)))
-            style.addSource(GeoJsonSource("destination", Point.fromLngLat(route.points.last().longitude, route.points.last().latitude)))
-            style.addLayer(CircleLayer("destination-dot", "destination").withProperties(circleRadius(7f), circleColor(Color.WHITE), circleStrokeColor(green), circleStrokeWidth(3f)))
-        } else {
-            style.getSourceAs<GeoJsonSource>("route")?.setGeoJson(line)
-            style.getSourceAs<GeoJsonSource>("destination")?.setGeoJson(Point.fromLngLat(route.points.last().longitude, route.points.last().latitude))
-        }
-    }
+    private fun drawRoute() { render() }
 
     private fun fitRoute() {
+        map?.moveCamera(CameraUpdateFactory.newCameraPosition(CameraPosition.Builder(map!!.cameraPosition).tilt(0.0).bearing(0.0).build()))
         val bounds = LatLngBounds.Builder().includes(route.points.map { LatLng(it.latitude, it.longitude) }).build()
-        map?.animateCamera(CameraUpdateFactory.newLatLngBounds(bounds, dp(38)))
+        map?.animateCamera(CameraUpdateFactory.newLatLngBounds(bounds, mapPadding[0] + dp(38), mapPadding[1] + dp(38), mapPadding[2] + dp(38), mapPadding[3] + dp(38)))
     }
 
     private fun render() {
+        if (!::drivingUi.isInitialized) return
+        val now = SystemClock.elapsedRealtime()
         val progress = progressMeters
-        val next = route.nextTurn(progress)
-        turnDistance.text = if (progress >= route.lengthMeters) "Arrived" else formatDistance(next.remainingMeters)
-        turnText.text = next.instruction
-        tripText.text = getString(R.string.trip_distances, formatDistance(progress), formatDistance((route.lengthMeters - progress).coerceAtLeast(0.0)))
-        modeText.text = if (!live) "PREVIEW" else if (tracker.state.running) "NAVIGATION" else "ODOMETER"
-        simPanel.visibility = if (live) View.GONE else View.VISIBLE
-        playButton.text = if (simRunning) "Ⅱ  Pause" else "▶  Drive"
-        seek.progress = (progress / route.lengthMeters * 10_000).toInt().coerceIn(0, 10_000)
-        followButton.text = if (follow) "Following" else "Follow"
-        undoButton.isEnabled = if (live) undoTrip != null else undoSimBefore != null
-        gpsButton.text = if (gpsPending) "GPS…" else "GPS Sync"
-        gpsButton.isEnabled = !gpsPending && (!live || tracker.state.running && tracker.state.baseM != null)
-        startButton.text = if (starting) "Cancel start" else if (live && tracker.state.running) "Stop route" else "Start route"
-        startButton.isEnabled = true
-        val carOffline = live && SystemClock.elapsedRealtime() - max(latestAt, connectionStartedAt) >= 10_000
-        val stale = live && (carOffline || latest?.anchorFresh == false || carIssue != CarFeedIssue.NONE)
-        feedText.text = when {
-            !live -> if (simRunning) "Preview drive · simulated 50 km/h" else "Route preview · Start route uses your odometer API"
-            carIssue == CarFeedIssue.AUTH -> carIssueMessage
-            carIssue == CarFeedIssue.UNAVAILABLE -> "Odometer unavailable · car channel not loaded"
-            carIssue == CarFeedIssue.INVALID -> carIssueMessage
-            carOffline -> "Car offline · no response for 10 seconds"
-            tracker.state.blockedReason != null -> tracker.state.blockedReason
-            starting -> "Waiting for the starting odometer anchor…"
-            carIssue == CarFeedIssue.NETWORK -> "Car connection unavailable · holding position"
-            else -> "$feedMessage · $transport"
-
-        }
-        feedText.setTextColor(if (stale || tracker.state.blockedReason != null && live) Color.rgb(151, 81, 26) else green)
+        val debug = positionDebug()
+        val presentation = DrivingPresenter.present(DrivingInputs(route, progress, tracker.state, debug, now,
+            live, simRunning, starting, latest, latestAt, connectionStartedAt, carIssue, carIssueMessage,
+            transport, feedMessage, follow, saveError), ::formatDistance)
+        currentFeedText = presentation.feedText
+        drivingUi.render(presentation.screen)
+        drivingMap?.render(route, progress, route.position(progress), debug, if (live) tracker.state.gaps else emptyList(), now)
         renderMapStatus()
-        val position = route.position(progress)
-        map?.style?.getSourceAs<GeoJsonSource>("position")?.setGeoJson(Point.fromLngLat(position.coordinate.longitude, position.coordinate.latitude))
-        renderPositionDebug(position.coordinate)
-        val gaps = tracker.state.gaps.map { gap -> route.position(gap.progressMeters).coordinate.let {
-            org.maplibre.geojson.Feature.fromGeometry(Point.fromLngLat(it.longitude, it.latitude))
-        } }
-        map?.style?.getSourceAs<GeoJsonSource>("route-gaps")?.setGeoJson(FeatureCollection.fromFeatures(gaps))
-        if (live && gaps.isNotEmpty()) tripText.append(" · ${gaps.size} distance gap(s)")
-        if (follow) map?.easeCamera(CameraUpdateFactory.newCameraPosition(CameraPosition.Builder()
-            .target(LatLng(position.coordinate.latitude, position.coordinate.longitude)).zoom(16.0).build()), 650)
     }
 
-    private fun positionDebug() = PositionDebug.compare(route.position(progressMeters).coordinate, gpsFix, SystemClock.elapsedRealtime())
+    private fun positionDebug() = PositionDebug.compare(route.position(progressMeters).coordinate, gpsFix,
+        SystemClock.elapsedRealtime(), checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED)
 
-    private fun renderPositionDebug(calculated: Coordinate = route.position(progressMeters).coordinate) {
-        val view = PositionDebug.compare(calculated, gpsFix, SystemClock.elapsedRealtime())
-        map?.style?.getSourceAs<GeoJsonSource>("gps-position")?.let { source ->
-            val actual = view.separateGps
-            if (actual == null) source.setGeoJson(FeatureCollection.fromFeatures(emptyList()))
-            else source.setGeoJson(Point.fromLngLat(actual.longitude, actual.latitude))
+    private fun refreshServices() {
+        servicePanel?.takeIf { it.isShowing }?.render(ServiceState(route.name, live, tracker.state.running, starting,
+            gpsPending, if (live) undoTrip != null else undoSimBefore != null, simRunning,
+            (progressMeters / route.lengthMeters * 10_000).toInt().coerceIn(0, 10_000), currentFeedText, mapSummary,
+            "${formatDistance(progressMeters)} travelled · ${formatDistance(route.lengthMeters)} total", appearance.mode.name.lowercase().replaceFirstChar { it.uppercase() }))
+    }
+
+    private fun showServices() {
+        servicePanel?.dismiss()
+        servicePanel = ServicePanel(this, palette, ServiceActions(
+            route = { routeMenu() }, api = { feedSettings() }, retry = { if (live) connectCar(retryAuth = true) else feedSettings() },
+            startStop = { if (live && tracker.state.running) stopRoute() else startRoute() },
+            align = { alignDialog() }, sync = { startGpsSync() }, undo = { undoSync() }, maps = { mapsMenu() },
+            positions = { debugMenu() }, apiDetails = { apiDebugMenu() }, appearance = { appearanceMenu() },
+            preview = { if (live) enterPreview() }, drive = { simRunning = !simRunning; follow = true; render() },
+            step = { delta -> simMeters = (simMeters + delta).coerceAtLeast(0.0); if (delta < 0) clearUndo(); render(); persist() },
+            seek = { value -> simMeters = route.lengthMeters * value / 10_000.0; clearUndo(); render() },
+            seekStart = { simRunning = false }, seekStop = { persist() })).also { it.show() }
+        refreshServices()
+    }
+
+    private fun enterPreview() {
+        if (live) simMeters = tracker.state.progressMeters
+        live = false; tracker.stop(); carFeed.stop(); starting = false; generation++; polling = false
+        simRunning = false; clearUndo(); persist(); render()
+    }
+
+    private fun appearanceMenu() {
+        AlertDialog.Builder(this).setTitle("Map appearance")
+            .setSingleChoiceItems(arrayOf("System", "Day", "Night"), appearance.mode.ordinal) { dialog, index ->
+                appearance.mode = AppearanceMode.entries[index]; applyAppearance(); dialog.dismiss()
+            }.setNegativeButton("Back to map", null).show()
+    }
+
+    private fun applyAppearance(reloadMap: Boolean = true) {
+        palette = DrivingPalette(appearance.night(this))
+        setTheme(if (palette.night) R.style.AppThemeNight else R.style.AppTheme)
+        window.statusBarColor = Color.TRANSPARENT
+        window.navigationBarColor = Color.TRANSPARENT
+        if (Build.VERSION.SDK_INT >= 30) {
+            val bars = android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
+            window.insetsController?.setSystemBarsAppearance(if (palette.night) 0 else bars, bars)
+        } else window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+            View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or if (palette.night) 0 else View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+        map?.uiSettings?.setCompassImage(getDrawable(if (palette.night) R.drawable.ic_compass_night else R.drawable.ic_compass_day)!!)
+        drivingUi.applyAppearance(palette)
+        if (reloadMap) loadMapStyle(false)
+        render()
+    }
+
+    private fun apiDebugMenu() {
+        val sample = latest
+        val text = buildString {
+            append(currentFeedText)
+            append("\n\nTransport: ").append(transport.ifBlank { "Not connected" })
+            append("\nNavigation: ").append(if (tracker.state.running) "Running" else "Stopped")
+            append("\nRoute distance: ").append(formatDistance(progressMeters))
+            append("\nCalibration: ").append(tracker.state.scale)
+            append("\nDistance gaps: ").append(tracker.state.gaps.size)
+            if (sample != null) {
+                append("\n\nOdometer: ").append(sample.odometerM ?: "No sample").append(" m")
+                append("\nSpeed: ").append(sample.speedKmh ?: "Unknown").append(" km/h")
+                append("\nEpoch: ").append(sample.epoch)
+                append("\nServer time: ").append(sample.t)
+                append("\nAnchor age: ").append(sample.odometerT?.let { String.format(Locale.US, "%.2f s", sample.t - it) } ?: "Unknown")
+                append("\nSpeed age: ").append(sample.speedT?.let { String.format(Locale.US, "%.2f s", sample.t - it) } ?: "Unknown")
+                append("\nECU connected: ").append(sample.connected)
+                append("\nClock synced: ").append(sample.clockSynced)
+                append("\nResets: ").append(sample.resets)
+                append("\nSource: ").append(sample.source)
+                append("\nMapping version: ").append(sample.mappingVersion)
+            }
         }
-        map?.style?.getLayerAs<CircleLayer>("position-dot")?.setProperties(
-            circleStrokeColor(if (view.merged) gpsBlue else Color.rgb(216, 247, 140)),
-            circleStrokeWidth(if (view.merged) 5f else 3f))
-        val fresh = view.gps
-        val caption = if (fresh == null) {
-            "● Calculated · ${if (gpsFix != null) "GPS stale · waiting for a fresh fix" else gpsDebugMessage}"
-        } else {
-            val legend = if (view.merged) "● GPS + calculated · within 50 m" else "● Calculated    ● GPS"
-            "$legend\n${formatDistance(view.separationMeters!!)} apart · GPS ±${fresh.accuracyMeters.roundToInt()} m · tap to inspect"
-        }
-        debugText.text = SpannableString(caption).apply {
-            val label = if (view.merged) "● GPS + calculated" else "● GPS"
-            val start = caption.indexOf(label)
-            if (start >= 0) setSpan(ForegroundColorSpan(gpsBlue), start, start + label.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-        }
-        debugText.contentDescription = "$caption. Tap for GPS details and map controls."
+        AlertDialog.Builder(this).setTitle("Car / navigation diagnostics").setMessage(text)
+            .setPositiveButton("Back to map", null).setNeutralButton("Retry connection") { _, _ -> if (live) connectCar(retryAuth = true) else feedSettings() }.show()
     }
 
     private fun startGpsDebug() {
         if (!active) return
         gpsDebug.start { fix, message ->
-            if (active) { gpsFix = fix; gpsDebugMessage = message; renderPositionDebug() }
+            if (active) { gpsFix = fix; gpsDebugMessage = message; render() }
         }
     }
 
@@ -431,7 +387,7 @@ class MainActivity : Activity() {
         val details = "Calculated: ${coordinates(view.calculated)}\n" + (view.gps?.let {
             "GPS: ${coordinates(it.coordinate)}\nSeparation: ${String.format(Locale.getDefault(), "%.1f", view.separationMeters)} m\nGPS accuracy: ±${it.accuracyMeters.roundToInt()} m"
         } ?: if (gpsFix != null) "GPS fix is stale." else gpsDebugMessage) +
-            "\n\nPositions within 50 m share the calculated marker, with a blue ring. GPS is shown at its reported coordinate. Displaying GPS never changes distance progress."
+            "\n\nThe chevron follows the route. The blue dot and accuracy circle stay at the raw GPS coordinate. A blue ring remains visible when their screen positions overlap. Displaying GPS never changes distance progress."
         val dialog = AlertDialog.Builder(this).setTitle("GPS / calculated position").setMessage(details)
             .setNeutralButton("Location settings") { _, _ -> startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)) }
             .setNegativeButton("Close", null)
@@ -444,10 +400,7 @@ class MainActivity : Activity() {
         val view = positionDebug()
         follow = false
         render()
-        val points = listOfNotNull(view.calculated, view.separateGps)
-        if (points.size == 1) map?.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(view.calculated.latitude, view.calculated.longitude), 16.0))
-        else map?.animateCamera(CameraUpdateFactory.newLatLngBounds(LatLngBounds.Builder()
-            .includes(points.map { LatLng(it.latitude, it.longitude) }).build(), dp(60)))
+        drivingMap?.showBoth(view, mapPadding)
     }
 
     private val tick = object : Runnable {
@@ -482,9 +435,7 @@ class MainActivity : Activity() {
         fields.addView(label(LAN_ODOMETER_URL, 12f, muted))
         fields.addView(url); fields.addView(token)
         val dialog = AlertDialog.Builder(this).setTitle("Odometer API").setView(fields)
-            .setPositiveButton("Use API", null).setNeutralButton("Preview") { _, _ ->
-                if (live) simMeters = tracker.state.progressMeters
-                live = false; tracker.stop(); carFeed.stop(); starting = false; generation++; polling = false; simRunning = false; clearUndo(); persist(); render()
+            .setPositiveButton("Use API", null).setNeutralButton("Preview") { _, _ -> enterPreview()
             }.setNegativeButton("Cancel", null).create()
         dialog.setOnShowListener { dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
             runCatching {
@@ -618,15 +569,19 @@ class MainActivity : Activity() {
     }
 
     private fun renderMapStatus() {
-        if (!::offline.isInitialized || !::kyivOffline.isInitialized || !::mapText.isInitialized || isDestroyed) return
+        if (!::offline.isInitialized || !::kyivOffline.isInitialized || isDestroyed) return
         val connection = if (hasInternet()) "Online map" else "No internet"
-        mapText.text = "$connection · Route: ${offline.statusText} · Kyiv: ${kyivOffline.statusText}"
+        mapSummary = "$connection · Route: ${offline.statusText} · Kyiv: ${kyivOffline.statusText}"
+        refreshServices()
     }
 
     private fun loadMapStyle(fit: Boolean) {
-        map?.setStyle(Style.Builder().fromUri(MAP_STYLE)) {
-            if (isDestroyed) return@setStyle
-            drawRoute(); if (fit) fitRoute(); render()
+        drivingMap?.loadStyle(palette.night) {
+            if (!isDestroyed) {
+                if (fit && !follow) fitRoute()
+                else if (follow) followState.recenter()
+                render()
+            }
         }
     }
 
@@ -801,7 +756,11 @@ class MainActivity : Activity() {
     override fun onStop() { mapView.onStop(); super.onStop() }
     override fun onDestroy() {
         connectivityCallback?.let { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(it) }
-        carFeed.close(); planner?.dismiss(); offline.close(); kyivOffline.close(); gps.cancel(); gpsDebug.stop(); mapView.onDestroy(); workers.shutdownNow(); disk.shutdown(); super.onDestroy() }
+        servicePanel?.dismiss(); drivingMap?.close(); carFeed.close(); planner?.dismiss(); offline.close(); kyivOffline.close(); gps.cancel(); gpsDebug.stop(); mapView.onDestroy(); workers.shutdownNow(); disk.shutdown(); super.onDestroy() }
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        if (palette.night != appearance.night(this)) applyAppearance()
+    }
     override fun onLowMemory() { super.onLowMemory(); mapView.onLowMemory() }
     override fun onSaveInstanceState(outState: Bundle) { super.onSaveInstanceState(outState); mapView.onSaveInstanceState(outState) }
 
@@ -812,7 +771,7 @@ class MainActivity : Activity() {
     private fun button(value: String, action: () -> Unit) = Button(this).apply {
         text = value; textSize = 12f; isAllCaps = false; setTextColor(ink); minWidth = 0; minimumWidth = 0
         minHeight = dp(44); minimumHeight = dp(44); setPadding(dp(3), 0, dp(3), 0)
-        background = GradientDrawable().apply { setColor(Color.rgb(231, 235, 225)); cornerRadius = dp(10).toFloat() }
+        background = GradientDrawable().apply { setColor(palette.soft); cornerRadius = dp(10).toFloat() }
         setOnClickListener { action() }
     }
     private fun row() = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(10), dp(6), dp(10), dp(6)) }

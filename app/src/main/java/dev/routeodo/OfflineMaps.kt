@@ -9,7 +9,9 @@ import org.maplibre.geojson.MultiPolygon
 import org.maplibre.geojson.Point
 import kotlin.math.*
 
-const val MAP_STYLE = "https://tiles.openfreemap.org/styles/liberty"
+// Preserve the existing resource manifest and pack identities for offline upgrades.
+// Bundled driving styles use a subset of these tiles and font stacks.
+const val OFFLINE_RESOURCE_STYLE = "https://tiles.openfreemap.org/styles/liberty"
 val KYIV_BOUNDS: LatLngBounds get() = LatLngBounds.from(50.62, 30.83, 50.21, 30.24)
 
 /** One independently managed pack. Route packs and the Kyiv area share MapLibre's tile database. */
@@ -30,11 +32,11 @@ class OfflineMaps(context: Context, private val update: (String) -> Unit) {
         private set
 
     fun select(route: Route) = select(route.id, route.name) {
-        OfflineGeometryRegionDefinition(MAP_STYLE, corridor(route), 0.0, 16.0, pixelRatio)
+        OfflineGeometryRegionDefinition(OFFLINE_RESOURCE_STYLE, corridor(route), 0.0, 16.0, pixelRatio)
     }
 
     fun selectKyiv() = select("kyiv-area-z15-v1", "Kyiv area") {
-        OfflineTilePyramidRegionDefinition(MAP_STYLE, KYIV_BOUNDS, 0.0, 15.0, pixelRatio)
+        OfflineTilePyramidRegionDefinition(OFFLINE_RESOURCE_STYLE, KYIV_BOUNDS, 0.0, 15.0, pixelRatio)
     }
 
     private fun select(packKey: String, packName: String, buildDefinition: () -> OfflineRegionDefinition) {
