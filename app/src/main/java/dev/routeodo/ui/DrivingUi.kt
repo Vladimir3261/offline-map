@@ -1,22 +1,22 @@
 package dev.routeodo.ui
 
 import android.content.Context
+import android.content.res.ColorStateList
 import android.graphics.*
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
-import android.content.res.ColorStateList
 import android.view.Gravity
 import android.view.View
 import android.widget.*
 import dev.routeodo.core.GpsDisplayState
+import dev.routeodo.data.SavedPlace
 import org.maplibre.android.maps.MapView
 
 internal fun Context.dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 internal fun TextView.updateText(value: CharSequence) { if (!android.text.TextUtils.equals(text, value)) text = value }
 internal fun rounded(color: Int, radius: Float) = GradientDrawable().apply { setColor(color); cornerRadius = radius }
 internal fun TextView.font(size: Float, color: Int, bold: Boolean = false): TextView = apply {
-    textSize = size; setTextColor(color); typeface = Typeface.create(if (bold) "sans-serif-medium" else "sans-serif", Typeface.NORMAL)
-    includeFontPadding = false
+    textSize = size; setTextColor(color); typeface = Typeface.create(if (bold) "sans-serif-medium" else "sans-serif", Typeface.NORMAL); includeFontPadding = false
 }
 
 data class DrivingState(
@@ -26,55 +26,73 @@ data class DrivingState(
     val preview: Boolean, val warning: Boolean, val following: Boolean,
 )
 
-/** Map-first surface. No route, odometer, credential or persistence responsibilities. */
-class DrivingUi(context: Context, mapView: MapView, private val services: () -> Unit,
-    private val recenter: () -> Unit, compare: () -> Unit,
+/** Explore → preview → drive. Technical controls live outside this map surface. */
+class DrivingUi(context: Context, mapView: MapView, menu: () -> Unit, search: () -> Unit,
+    edit: () -> Unit, private val primary: () -> Unit, recenter: () -> Unit, compare: () -> Unit,
     private val mapInsets: (Int, Int, Int, Int) -> Unit,
 ) : FrameLayout(context) {
     private var palette = DrivingPalette(false)
     private val top = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-    private val maneuver = LinearLayout(context).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(14), dp(14), dp(16), dp(14)); elevation = dp(7).toFloat() }
+    private val searchBar = LinearLayout(context).apply { gravity = Gravity.CENTER_VERTICAL }
+    private val searchText = TextView(context).font(19f, palette.text, true).apply {
+        text = "⌕   Where to?"; gravity = Gravity.CENTER_VERTICAL; setPadding(dp(20), 0, 0, 0)
+        isClickable = true; isFocusable = true; contentDescription = "Search for an address or place"; setOnClickListener { search() }
+    }
+    private val searchMenu = button("⋯", "Menu", menu)
+    private val maneuver = LinearLayout(context).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(12), dp(12), dp(6), dp(12)) }
     private val turn = TurnIcon(context)
-    private val distance = TextView(context).font(34f, palette.text, true)
-    private val street = TextView(context).font(17f, palette.text, true).apply { maxLines = 2 }
-    private val comparisonCard = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(10), dp(16), dp(10)); elevation = dp(4).toFloat() }
-    private val separation = TextView(context).font(15f, palette.accent, true)
-    private val accuracy = TextView(context).font(12f, palette.secondary).apply { setPadding(0, dp(4), 0, 0) }
-    private val bottom = LinearLayout(context).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(16), dp(14), dp(12), dp(14)); elevation = dp(9).toFloat() }
-    private val speed = TextView(context).font(35f, palette.text, true).apply { gravity = Gravity.CENTER }
-    private val units = TextView(context).font(11f, palette.secondary).apply { text = "km/h"; gravity = Gravity.CENTER }
-    private val source = TextView(context).font(13f, palette.accent, true)
-    private val connection = TextView(context).font(12f, palette.secondary).apply { maxLines = 2; setPadding(0, dp(4), 0, dp(4)) }
-    private val remaining = TextView(context).font(15f, palette.text, true)
-    private val serviceButton = control("Services", false, services)
-    private val followButton = control("Recenter", true, recenter)
-    private val notice = TextView(context).font(12f, palette.secondary, true).apply { setPadding(dp(12), dp(9), dp(12), dp(9)); maxLines = 2; elevation = dp(4).toFloat() }
+    private val distance = TextView(context).font(32f, palette.text, true)
+    private val instruction = TextView(context).font(16f, palette.text, true).apply { maxLines = 2 }
+    private val navMenu = button("⋯", "Menu", menu)
+    private val bottom = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(18), dp(16), dp(18), dp(14)) }
+    private val title = TextView(context).font(20f, palette.text, true).apply { maxLines = 2 }
+    private val summary = TextView(context).font(27f, palette.text, true).apply { setPadding(0, dp(6), 0, dp(5)) }
+    private val subtitle = TextView(context).font(13f, palette.secondary).apply { maxLines = 2 }
+    private val actions = LinearLayout(context).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(0, dp(14), 0, 0) }
+    private val editButton = button("Edit route", "Edit route", edit)
+    private val primaryButton = button("Start", "Start route", primary)
+    private val navRow = LinearLayout(context).apply { gravity = Gravity.CENTER_VERTICAL }
+    private val speed = TextView(context).font(32f, palette.text, true).apply { gravity = Gravity.CENTER }
+    private val speedUnit = TextView(context).font(11f, palette.secondary).apply { text = "km/h"; gravity = Gravity.CENTER }
+    private val navInfo = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(14), 0, dp(8), 0) }
+    private val remaining = TextView(context).font(22f, palette.text, true)
+    private val arrival = TextView(context).font(13f, palette.secondary).apply { maxLines = 1; setPadding(0, dp(5), 0, 0) }
+    private val stop = button("Stop", "Stop route", primary)
+    private val comparison = TextView(context).font(12f, palette.secondary).apply {
+        minHeight = dp(48); gravity = Gravity.CENTER_VERTICAL; maxLines = 2; isClickable = true; isFocusable = true; setOnClickListener { compare() }
+    }
+    private val shortcuts = LinearLayout(context).apply { gravity = Gravity.CENTER_VERTICAL }
+    private val shortcutScroll = HorizontalScrollView(context).apply { isHorizontalScrollBarEnabled = false; addView(shortcuts) }
+    private val followButton = button("➤", "Recenter", recenter).apply { textSize = 26f }
+    private val notice = TextView(context).font(12f, palette.warning, true).apply { setPadding(dp(12), dp(10), dp(12), dp(10)); maxLines = 2 }
     private var safeLeft = 0; private var safeTop = 0; private var safeRight = 0; private var safeBottom = 0
     private var lastInsets = emptyList<Int>()
+    private var phase = JourneyPhase.EXPLORE
 
     init {
         addView(mapView, LayoutParams(-1, -1))
-        val wording = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), 0, 0, 0) }
-        wording.addView(distance); wording.addView(street)
-        maneuver.addView(turn, LinearLayout.LayoutParams(dp(64), dp(68)))
-        maneuver.addView(wording, LinearLayout.LayoutParams(0, -2, 1f))
-        top.addView(maneuver, LinearLayout.LayoutParams(-1, -2))
-        comparisonCard.addView(separation); comparisonCard.addView(accuracy)
-        comparisonCard.isClickable = true; comparisonCard.isFocusable = true
-        comparisonCard.contentDescription = "GPS and odometer comparison. Details and Show both"
-        comparisonCard.setOnClickListener { compare() }
-        top.addView(comparisonCard, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
+        searchBar.addView(searchText, LinearLayout.LayoutParams(0, dp(60), 1f))
+        searchBar.addView(searchMenu, LinearLayout.LayoutParams(dp(56), dp(56)))
+        top.addView(searchBar)
+        maneuver.addView(turn, LinearLayout.LayoutParams(dp(58), dp(62)))
+        val words = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(14), 0, dp(2), 0); addView(distance); addView(instruction) }
+        maneuver.addView(words, LinearLayout.LayoutParams(0, -2, 1f))
+        maneuver.addView(navMenu, LinearLayout.LayoutParams(dp(48), dp(48)))
+        top.addView(maneuver)
         addView(top, LayoutParams(-1, -2, Gravity.TOP or Gravity.START))
-        val speedColumn = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-        speedColumn.addView(speed); speedColumn.addView(units)
-        bottom.addView(speedColumn, LinearLayout.LayoutParams(dp(68), -2))
-        val info = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(14), 0, dp(8), 0) }
-        info.addView(source); info.addView(connection); info.addView(remaining)
-        bottom.addView(info, LinearLayout.LayoutParams(0, -2, 1f))
-        bottom.addView(serviceButton, LinearLayout.LayoutParams(dp(68), dp(64)))
-        addView(bottom, LayoutParams(-1, -2, Gravity.BOTTOM))
+        bottom.addView(title); bottom.addView(summary); bottom.addView(subtitle)
+        bottom.addView(shortcutScroll, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) })
+        actions.addView(editButton, LinearLayout.LayoutParams(0, dp(54), 1f).apply { rightMargin = dp(10) })
+        actions.addView(primaryButton, LinearLayout.LayoutParams(0, dp(54), 1.3f)); bottom.addView(actions)
+        val speedColumn = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL; addView(speed); addView(speedUnit) }
+        navRow.addView(speedColumn, LinearLayout.LayoutParams(dp(60), -2))
+        navInfo.addView(remaining); navInfo.addView(arrival)
+        navRow.addView(navInfo, LinearLayout.LayoutParams(0, -2, 1f))
+        navRow.addView(stop, LinearLayout.LayoutParams(dp(78), dp(54)))
+        bottom.addView(navRow); bottom.addView(comparison)
+        addView(bottom, LayoutParams(-1, -2, Gravity.BOTTOM or Gravity.START))
         addView(notice, LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.START))
-        addView(followButton, LayoutParams(dp(68), dp(64), Gravity.BOTTOM or Gravity.END))
+        addView(followButton, LayoutParams(dp(56), dp(56), Gravity.BOTTOM or Gravity.END))
         setOnApplyWindowInsetsListener { _, insets ->
             safeLeft = insets.systemWindowInsetLeft; safeTop = insets.systemWindowInsetTop
             safeRight = insets.systemWindowInsetRight; safeBottom = insets.systemWindowInsetBottom
@@ -83,93 +101,93 @@ class DrivingUi(context: Context, mapView: MapView, private val services: () -> 
         applyAppearance(palette)
     }
 
-    private fun dp(n: Int) = context.dp(n)
-    private fun control(label: String, arrow: Boolean, action: () -> Unit) = LinearLayout(context).apply {
-        orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; isClickable = true; isFocusable = true
-        contentDescription = label; setOnClickListener { action() }; elevation = if (arrow) dp(5).toFloat() else 0f
-        addView(ControlIcon(context, arrow), LinearLayout.LayoutParams(dp(26), dp(26)))
-        addView(TextView(context).font(10f, palette.accent, true).apply { text = label; gravity = Gravity.CENTER; setPadding(0, dp(3), 0, 0) })
+    fun savedPlaces(places: List<SavedPlace>, open: (SavedPlace?) -> Unit) {
+        shortcuts.removeAllViews()
+        places.sortedBy { if (it.name.equals("Home", true)) 0 else if (it.name.equals("Work", true)) 1 else 2 }.take(8).forEach { item ->
+            shortcuts.addView(button("★  ${item.name}", "Route to ${item.name}") { open(item) }, LinearLayout.LayoutParams(-2, dp(48)).apply { rightMargin = dp(8) })
+        }
+        shortcuts.addView(button(if (places.isEmpty()) "☆  Saved places" else "All places", "Saved places") { open(null) }, LinearLayout.LayoutParams(-2, dp(48)))
     }
 
     fun applyAppearance(value: DrivingPalette) {
         palette = value
-        maneuver.background = rounded(value.panel, dp(22).toFloat())
-        comparisonCard.background = rounded(value.panel, dp(18).toFloat())
-        comparisonCard.foreground = RippleDrawable(ColorStateList.valueOf(0x224285F4), null, rounded(Color.WHITE, dp(18).toFloat()))
+        searchBar.background = rounded(value.panel, dp(24).toFloat()); maneuver.background = rounded(value.panel, dp(22).toFloat())
         bottom.background = rounded(value.panel, dp(24).toFloat())
-        for (view in listOf(distance, street, speed, remaining)) view.setTextColor(value.text)
-        for (view in listOf(units, connection, accuracy)) view.setTextColor(value.secondary)
-        for (button in listOf(serviceButton, followButton)) {
-            button.background = RippleDrawable(ColorStateList.valueOf(0x334285F4), rounded(value.soft, dp(18).toFloat()), null)
-            (button.getChildAt(0) as ControlIcon).color = value.accent
-            (button.getChildAt(1) as TextView).setTextColor(value.accent)
-        }
-        turn.background = rounded(Color.parseColor(if (value.night) "#3559B1" else "#285EE8"), dp(18).toFloat())
+        for (v in listOf(searchText, distance, instruction, title, summary, remaining, speed)) v.setTextColor(value.text)
+        for (v in listOf(subtitle, arrival, speedUnit, comparison)) v.setTextColor(value.secondary)
+        for (v in listOf(searchMenu, navMenu, editButton, followButton)) { v.background = rounded(value.soft, dp(20).toFloat()); v.setTextColor(value.accent) }
+        primaryButton.background = rounded(value.accent, dp(18).toFloat()); primaryButton.setTextColor(if (value.night) Color.parseColor("#14213C") else Color.WHITE)
+        stop.background = rounded(if (value.night) Color.parseColor("#4D3030") else Color.parseColor("#FCECEA"), dp(18).toFloat()); stop.setTextColor(value.warning)
+        turn.background = rounded(Color.parseColor(if (value.night) "#3559B1" else "#285EE8"), dp(16).toFloat())
     }
 
-    fun render(state: DrivingState) {
-        distance.updateText(state.maneuverDistance); street.updateText(state.instruction)
-        turn.instruction = state.instruction
-        speed.updateText(state.speed); source.updateText(state.source); connection.updateText(state.connection); remaining.updateText(state.remaining)
-        source.setTextColor(if (state.warning) palette.warning else palette.accent)
-        separation.updateText(state.comparison); accuracy.updateText(state.accuracy)
-        separation.setTextColor(if (state.gpsState == GpsDisplayState.STALE) palette.warning else palette.accent)
-        val description = "${state.comparison}. ${state.accuracy}. Tap for details and Show both"
-        if (comparisonCard.contentDescription != description) comparisonCard.contentDescription = description
-        notice.updateText(state.notice)
-        notice.visibility = if (state.notice.isEmpty()) GONE else VISIBLE
-        notice.setTextColor(if (state.preview) Color.parseColor(if (palette.night) "#D6C8FF" else "#643AA8") else palette.warning)
-        notice.background = rounded(if (state.preview) Color.parseColor(if (palette.night) "#362D4D" else "#F0E9FC") else palette.panel, dp(14).toFloat())
-        val caption = if (state.following) "Following" else "Recenter"
-        (followButton.getChildAt(1) as TextView).updateText(caption)
-        val followDescription = if (state.following) "Following calculated position. Recenter" else "Recenter on calculated position"
-        if (followButton.contentDescription != followDescription) followButton.contentDescription = followDescription
+    fun render(state: DrivingState, journey: JourneyUi) {
+        phase = journey.phase
+        val guiding = journey.guiding
+        searchBar.visibility = if (guiding) GONE else VISIBLE
+        maneuver.visibility = if (guiding) VISIBLE else GONE
+        distance.updateText(state.maneuverDistance); instruction.updateText(state.instruction); turn.instruction = state.instruction
+        val exploring = phase == JourneyPhase.EXPLORE
+        for (v in listOf(title, summary, subtitle, actions)) v.visibility = if (guiding) GONE else VISIBLE
+        summary.visibility = if (guiding || exploring || journey.picking) GONE else VISIBLE
+        title.updateText(if (exploring) "Where are we going?" else if (journey.picking) "Choose ${if (phase == JourneyPhase.PICK_START) "a starting point" else "a destination"}" else journey.title)
+        summary.updateText(journey.summary)
+        subtitle.updateText(if (exploring) "Search for an address, a shop or a saved place" else if (journey.picking) "Long-press the map to place your pin" else journey.origin)
+        shortcutScroll.visibility = if (exploring) VISIBLE else GONE
+        actions.visibility = if (guiding || exploring) GONE else VISIBLE
+        editButton.visibility = if (journey.picking) GONE else VISIBLE
+        primaryButton.updateText(if (journey.picking) "Cancel" else "Start")
+        primaryButton.contentDescription = if (journey.picking) "Cancel map selection" else "Start route"
+        navRow.visibility = if (guiding) VISIBLE else GONE
+        comparison.visibility = if (guiding) VISIBLE else GONE
+        speed.updateText(state.speed); remaining.updateText(state.remaining.removeSuffix(" remaining"))
+        arrival.updateText(if (phase == JourneyPhase.SIMULATION) "Simulated drive" else if (phase == JourneyPhase.STARTING) "Waiting for car…" else if (state.warning) state.connection else "To ${journey.title}")
+        stop.updateText(if (phase == JourneyPhase.STARTING) "Cancel" else if (phase == JourneyPhase.SIMULATION) "Exit" else "Stop")
+        stop.contentDescription = if (phase == JourneyPhase.SIMULATION) "Exit simulation" else if (phase == JourneyPhase.STARTING) "Cancel start" else "Stop route"
+        val gpsText = state.comparison.replace("GPS ↔ ODO:", "GPS:")
+        comparison.updateText(if (state.gpsState == GpsDisplayState.LIVE) "$gpsText apart · ${state.accuracy.removePrefix("GPS accuracy: ")}" else gpsText)
+        comparison.setTextColor(if (state.gpsState == GpsDisplayState.STALE) palette.warning else palette.secondary)
+        val comparisonDescription = "${state.comparison}. ${state.accuracy}. Position details"
+        if (comparison.contentDescription != comparisonDescription) comparison.contentDescription = comparisonDescription
+        val banner = if (phase == JourneyPhase.SIMULATION) "SIMULATION · no vehicle movement"
+            else if (!state.preview && (guiding || state.warning)) state.notice.replace("Services → API", "Menu → Car connection") else ""
+        notice.updateText(banner); notice.visibility = if (banner.isEmpty()) GONE else VISIBLE
+        notice.background = rounded(if (phase == JourneyPhase.SIMULATION) Color.parseColor(if (palette.night) "#362D4D" else "#F0E9FC") else palette.panel, dp(14).toFloat())
+        notice.setTextColor(if (phase == JourneyPhase.SIMULATION) Color.parseColor(if (palette.night) "#D6C8FF" else "#643AA8") else palette.warning)
+        val description = if (state.following && guiding) "Following calculated position. Recenter" else "Recenter map"
+        if (followButton.contentDescription != description) followButton.contentDescription = description
         arrange()
     }
 
-    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        arrange(MeasureSpec.getSize(widthMeasureSpec), MeasureSpec.getSize(heightMeasureSpec))
-        super.onMeasure(widthMeasureSpec, heightMeasureSpec)
+    private fun dp(value: Int) = context.dp(value)
+    private fun button(caption: String, description: String, click: () -> Unit) = Button(context).apply {
+        text = caption; contentDescription = description; isAllCaps = false; textSize = 16f; minWidth = 0; minimumWidth = 0
+        minHeight = dp(48); setPadding(dp(12), dp(6), dp(12), dp(6)); stateListAnimator = null
+        background = RippleDrawable(ColorStateList.valueOf(0x224285F4), rounded(palette.soft, dp(18).toFloat()), null)
+        setTextColor(palette.accent); setOnClickListener { click() }
     }
-
-    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) { super.onSizeChanged(w, h, oldw, oldh); arrange() }
+    override fun onMeasure(w: Int, h: Int) { arrange(MeasureSpec.getSize(w), MeasureSpec.getSize(h)); super.onMeasure(w, h) }
     override fun onLayout(changed: Boolean, l: Int, t: Int, r: Int, b: Int) { super.onLayout(changed, l, t, r, b); arrange() }
-
-    private fun arrange(surfaceWidth: Int = width, surfaceHeight: Int = height) {
-        if (surfaceWidth == 0 || surfaceHeight == 0) return
-        val wide = surfaceWidth > surfaceHeight * 1.15
-        val available = surfaceWidth - safeLeft - safeRight - dp(28)
-        val cardWidth = if (wide) minOf(dp(370), (available * .45).toInt()) else minOf(dp(500), available)
-        fun place(view: View, w: Int, gravity: Int, left: Int, topMargin: Int, right: Int, bottomMargin: Int) {
+    private fun arrange(w: Int = width, h: Int = height) {
+        if (w == 0 || h == 0) return
+        val wide = w > h * 1.15
+        val available = w - safeLeft - safeRight - dp(28)
+        val card = if (wide) minOf(dp(390), (available * .45).toInt()) else minOf(dp(500), available)
+        fun place(view: View, width: Int, height: Int, gravity: Int, left: Int, top: Int, right: Int, bottom: Int) {
             val old = view.layoutParams as LayoutParams
-            if (old.width == w && old.gravity == gravity && old.leftMargin == left && old.topMargin == topMargin && old.rightMargin == right && old.bottomMargin == bottomMargin) return
-            view.layoutParams = LayoutParams(w, if (view === followButton) dp(64) else -2, gravity).apply {
-                setMargins(left, topMargin, right, bottomMargin)
-            }
+            if (old.width == width && old.height == height && old.gravity == gravity && old.leftMargin == left && old.topMargin == top && old.rightMargin == right && old.bottomMargin == bottom) return
+            view.layoutParams = LayoutParams(width, height, gravity).apply { setMargins(left, top, right, bottom) }
         }
-        place(top, cardWidth, Gravity.TOP or Gravity.START, safeLeft + dp(14), safeTop + dp(12), 0, 0)
-        val bottomWidth = if (wide) minOf(dp(570), available - dp(82)) else minOf(dp(500), available)
-        place(bottom, bottomWidth, Gravity.BOTTOM or Gravity.START, safeLeft + dp(14), 0, 0, safeBottom + dp(12))
-        place(followButton, dp(68), Gravity.BOTTOM or Gravity.END, 0, 0, safeRight + dp(14), safeBottom + if (wide) dp(12) else bottom.height + dp(26))
-        place(notice, if (wide) cardWidth else maxOf(dp(100), cardWidth - dp(82)), Gravity.BOTTOM or Gravity.START, safeLeft + dp(14), 0, 0, safeBottom + bottom.height + dp(26))
-        val padding = if (wide) listOf(safeLeft + cardWidth + dp(32), safeTop + dp(24), safeRight + dp(28), safeBottom + bottom.height + dp(32))
-            else listOf(safeLeft + dp(24), safeTop + top.height + dp(35), safeRight + dp(24), safeBottom + bottom.height + dp(42))
+        place(top, card, -2, Gravity.TOP or Gravity.START, safeLeft + dp(14), safeTop + dp(12), 0, 0)
+        val bottomWidth = if (wide) minOf(dp(500), card) else card
+        place(bottom, bottomWidth, -2, Gravity.BOTTOM or Gravity.START, safeLeft + dp(14), 0, 0, safeBottom + dp(12))
+        place(followButton, dp(56), dp(56), Gravity.BOTTOM or Gravity.END, 0, 0, safeRight + dp(14), safeBottom + if (wide) dp(16) else bottom.height + dp(26))
+        place(notice, if (wide) card else maxOf(dp(100), card - dp(70)), -2, Gravity.BOTTOM or Gravity.START, safeLeft + dp(14), 0, 0, safeBottom + bottom.height + dp(26))
+        val padding = if (wide) listOf(safeLeft + card + dp(30), safeTop + dp(24), safeRight + dp(24), safeBottom + dp(30))
+            else listOf(safeLeft + dp(24), safeTop + top.height + dp(32), safeRight + dp(24), safeBottom + bottom.height + dp(38))
         if (padding != lastInsets) { lastInsets = padding; mapInsets(padding[0], padding[1], padding[2], padding[3]) }
     }
 }
-
-private class ControlIcon(context: Context, private val arrow: Boolean) : View(context) {
-    var color = Color.BLUE; set(value) { field = value; invalidate() }
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-    override fun onDraw(canvas: Canvas) {
-        canvas.save(); canvas.scale(width / 24f, height / 24f)
-        paint.color = color; paint.style = Paint.Style.FILL
-        if (arrow) canvas.drawPath(Path().apply { moveTo(12f, 2f); lineTo(21f, 21f); lineTo(12f, 16f); lineTo(3f, 21f); close() }, paint)
-        else for (x in listOf(5f, 15f)) for (y in listOf(5f, 15f)) canvas.drawRoundRect(x, y, x + 5, y + 5, 1.5f, 1.5f, paint)
-        canvas.restore()
-    }
-}
-
 private class TurnIcon(context: Context) : View(context) {
     var instruction = ""; set(value) { if (field != value) { field = value; invalidate() } }
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; strokeWidth = 3.5f; style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND }

@@ -23,7 +23,20 @@ object PlaceCodec {
                 val label = listOfNotNull(value("name"), street.takeIf { it.isNotBlank() },
                     value("district"), value("city") ?: value("locality"), value("state"), value("country"))
                     .distinct().joinToString(", ")
-                Place(label, coordinate)
+                val category = when (value("osm_key")) {
+                    "shop" -> "Shop"
+                    "tourism" -> "Place to visit"
+                    "leisure" -> "Leisure"
+                    "railway" -> "Station"
+                    "amenity" -> when (value("osm_value")) {
+                        "cafe", "restaurant", "fast_food", "bar", "pub" -> "Food & drink"
+                        "fuel" -> "Fuel station"
+                        "parking" -> "Parking"
+                        else -> "Place"
+                    }
+                    else -> null
+                }
+                Place(label, coordinate, category)
             }.getOrNull()
         }.distinctBy { it.label to it.coordinate }
     }

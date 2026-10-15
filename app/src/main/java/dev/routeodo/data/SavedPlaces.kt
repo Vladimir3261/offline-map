@@ -17,13 +17,14 @@ object SavedPlaceCodec {
             val p = array.getJSONObject(i)
             val name = p.getString("name")
             require(name.isNotBlank() && name.length <= 60)
-            SavedPlace(name, Place(p.getString("address"), Coordinate(p.getDouble("lat"), p.getDouble("lon"))))
+            SavedPlace(name, Place(p.getString("address"), Coordinate(p.getDouble("lat"), p.getDouble("lon")),
+                p.optString("category").takeIf { it.isNotBlank() && it != "null" }))
         }.getOrNull() }
     }
 
     fun write(places: List<SavedPlace>): String = JSONArray().apply {
         places.forEach { put(JSONObject().put("name", it.name).put("address", it.place.label)
-            .put("lat", it.place.coordinate.latitude).put("lon", it.place.coordinate.longitude)) }
+            .put("lat", it.place.coordinate.latitude).put("lon", it.place.coordinate.longitude).put("category", it.place.category)) }
     }.toString()
 }
 

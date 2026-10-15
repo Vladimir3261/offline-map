@@ -31,6 +31,7 @@ import android.widget.*
 import dev.routeodo.core.*
 import dev.routeodo.data.*
 import dev.routeodo.ui.*
+import dev.routeodo.voice.*
 import android.content.res.Configuration
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.json.JSONObject
@@ -54,6 +55,17 @@ import java.util.concurrent.Executors
 import kotlin.math.*
 
 class MainActivity : Activity() {
+    private lateinit var motion: PhoneMotion
+    private var predictionEnabled = false
+    private var roadGraph: RoadGraph? = null
+    private var predictor: RoadPredictor? = null
+    private var predictedPosition: RoutePosition? = null
+    private var predictionTravel = 0.0
+    private var predictionEpoch: String? = null
+    private var predictionStatus = "Experimental prediction off"
+    private var lastPredictionRouteAt = 0L
+    private var predictionConfident = false
+    private var predictionFault = false
     private var palette = DrivingPalette(false)
     private val ink get() = palette.text
     private val green get() = palette.accent
@@ -80,6 +92,7 @@ class MainActivity : Activity() {
     private lateinit var offline: OfflineMaps
     private lateinit var kyivOffline: OfflineMaps
     private var planner: RoutePlanner? = null
+    private var voiceDialog: VoiceLocationDialog? = null
     private var mapsStatusUpdate: (() -> Unit)? = null
     private var refreshingMap = false
     private var geocodingUrl = DEFAULT_GEOCODER
@@ -91,6 +104,12 @@ class MainActivity : Activity() {
     private var live = false
     private var simMeters = 0.0
     private var simRunning = false
+    private var routeSelected = false
+    private var simulationMode = false
+    private var routeDetails: RouteDetails? = null
+    private var draftStart: Place? = null
+    private var draftEnd: Place? = null
+    private var pickingStart: Boolean? = null
     private val followState = FollowState()
     private var follow: Boolean
         get() = followState.enabled
@@ -140,6 +159,9 @@ class MainActivity : Activity() {
         tryLanFirst = preferences.getBoolean("tryLanFirst", true)
         routingUrl = preferences.getString("routingUrl", routingUrl) ?: routingUrl
         geocodingUrl = preferences.getString("geocodingUrl", geocodingUrl) ?: geocodingUrl
+        motion = PhoneMotion(this)
+        predictionEnabled = preferences.getBoolean("roadPrediction", false)
+        roadGraph = runCatching { RoadGraphCodec.read(android.util.AtomicFile(java.io.File(filesDir, "roads.json")).openRead().bufferedReader().use { it.readText() }) }.getOrNull()
         restore()
         buildUi(savedInstanceState)
         carFeed = CarFeed(this, sample = { sample, source ->
@@ -150,6 +172,7 @@ class MainActivity : Activity() {
                 if (tracker.state != before) schedulePersist()
                 if (tracker.state.baseM != null) starting = false
                 feedMessage = result.message
+                updatePrediction(sample, result.accepted)
                 render()
             }
         }, status = { issue, message ->
@@ -205,6 +228,9 @@ class MainActivity : Activity() {
             val restoredTracker = TripTracker(JsonCodec.state(saved.getJSONObject("tracker")))
             val restoredSim = saved.getDouble("simMeters")
             require(restoredSim.isFinite() && restoredSim >= 0)
+            routeSelected = saved.optBoolean("routeSelected", true)
+            simulationMode = saved.optBoolean("simulationMode", false)
+            routeDetails = saved.optJSONObject("routeDetails")?.let { runCatching { RouteDetails.read(it) }.getOrNull() }
             route = restoredRoute
             tracker = restoredTracker
             simMeters = restoredSim
@@ -228,6 +254,9 @@ class MainActivity : Activity() {
     private fun persist() {
         handler.removeCallbacks(saveTask); saveScheduled = false
         // Stream updates can arrive ten times a second. Coalesce them and serialize off the UI thread.
+        val selected = routeSelected
+        val simulation = simulationMode
+        val details = routeDetails
         val savedRoute = route
         val savedTrip = tracker.state
         val savedLive = live
@@ -239,6 +268,7 @@ class MainActivity : Activity() {
             val json = JSONObject().put("route", JsonCodec.route(savedRoute)).put("tracker", JsonCodec.state(savedTrip))
                 .put("live", savedLive).put("simMeters", savedSim).put("undoTrip", savedUndo?.let { JsonCodec.state(it) })
                 .put("undoSimBefore", savedUndoBefore).put("undoSimAfter", savedUndoAfter)
+                .put("routeSelected", selected).put("simulationMode", simulation).put("routeDetails", details?.json())
             store.write(json)
         }.onFailure {
             handler.post { if (!isDestroyed) { saveError = getString(R.string.save_failed); render() } }
@@ -248,13 +278,17 @@ class MainActivity : Activity() {
     private fun buildUi(savedInstanceState: Bundle?) {
         mapView = MapView(this)
         mapView.onCreate(savedInstanceState)
-        drivingUi = DrivingUi(this, mapView, services = { showServices() }, recenter = {
-            follow = true; render()
-        }, compare = { debugMenu() }, mapInsets = { left, top, right, bottom ->
-            mapPadding = intArrayOf(left, top, right, bottom)
-            map?.setPadding(left, top, right, bottom)
-            map?.uiSettings?.setAttributionMargins(dp(8), 0, 0, dp(8))
-        })
+        drivingUi = DrivingUi(this, mapView, menu = { mapMenu() }, search = { planRoute() },
+            edit = { planRoute(edit = true) }, primary = { primaryAction() }, recenter = {
+                if (journey().guiding) { follow = true; render() }
+                else if (routeSelected) fitRoute() else centerExplore()
+            }, compare = { debugMenu() }, mapInsets = { left, top, right, bottom ->
+                mapPadding = intArrayOf(left, top, right, bottom)
+                map?.setPadding(left, top, right, bottom)
+                map?.uiSettings?.setAttributionMargins(dp(8), 0, 0, dp(8))
+                if (follow && journey().guiding) followState.recenter()
+            })
+        refreshSavedPlaces()
         setContentView(drivingUi)
         applyAppearance(reloadMap = false)
     }
@@ -274,21 +308,70 @@ class MainActivity : Activity() {
         val debug = positionDebug()
         val presentation = DrivingPresenter.present(DrivingInputs(route, progress, tracker.state, debug, now,
             live, simRunning, starting, latest, latestAt, connectionStartedAt, carIssue, carIssueMessage,
-            transport, feedMessage, follow, saveError), ::formatDistance)
+            transport, feedMessage, follow, saveError ?: if (predictionEnabled && live) predictionStatus else null), ::formatDistance)
         currentFeedText = presentation.feedText
-        drivingUi.render(presentation.screen)
-        drivingMap?.render(route, progress, route.position(progress), debug, if (live) tracker.state.gaps else emptyList(), now)
+        val journey = journey()
+        val screen = if (predictionEnabled && live && tracker.state.running && !predictionConfident)
+            presentation.screen.copy(maneuverDistance = "—", instruction = "Position uncertain · align to resume guidance", warning = true)
+        else if (predictionEnabled && live && tracker.state.running) presentation.screen.copy(source = "EXPERIMENTAL · ROADS")
+        else presentation.screen
+        drivingUi.render(screen, journey)
+        if (!routeSelected || journey.picking) drivingMap?.renderExplore(debug.gps)
+        else {
+            val shownProgress = if (journey.guiding) progress else 0.0
+            drivingMap?.render(route, shownProgress, predictedPosition ?: route.position(shownProgress), debug,
+                if (live && journey.guiding) tracker.state.gaps else emptyList(), now, journey.guiding)
+        }
         renderMapStatus()
     }
 
-    private fun positionDebug() = PositionDebug.compare(route.position(progressMeters).coordinate, gpsFix,
+    private fun journey() = JourneyUi.present(routeSelected, live && tracker.state.running, starting,
+        simulationMode, pickingStart, route, routeDetails, ::formatDistance)
+
+    private fun refreshSavedPlaces() {
+        if (::drivingUi.isInitialized) drivingUi.savedPlaces(SavedPlaces(this).all()) { planRoute(it?.place) }
+    }
+
+    private fun centerExplore() {
+        follow = false
+        val point = positionDebug().gps?.coordinate ?: KYIV_CENTER
+        map?.animateCamera(CameraUpdateFactory.newCameraPosition(CameraPosition.Builder().target(LatLng(point.latitude, point.longitude))
+            .zoom(if (gpsFix != null) 15.0 else 12.0).tilt(0.0).bearing(0.0).build()))
+    }
+
+    private fun primaryAction() {
+        when (journey().phase) {
+            JourneyPhase.PICK_START, JourneyPhase.PICK_DESTINATION -> { pickingStart = null; render(); openPlanner(draftStart, draftEnd) }
+            JourneyPhase.SIMULATION -> { simRunning = false; simulationMode = false; simMeters = 0.0; follow = false; persist(); render(); handler.post { fitRoute() } }
+            JourneyPhase.STARTING, JourneyPhase.NAVIGATING -> {
+                stopRoute(); carFeed.stop(); live = false; routeSelected = false; simulationMode = false; follow = false
+                persist(); render()
+                map?.let { it.animateCamera(CameraUpdateFactory.newCameraPosition(CameraPosition.Builder(it.cameraPosition).tilt(0.0).bearing(0.0).build())) }
+            }
+            else -> startRoute()
+        }
+    }
+
+    private fun mapMenu() {
+        val items = mutableListOf("New route" to { planRoute() }, "Saved places" to { planRoute() })
+        if (journey().guiding) {
+            items += "GPS Sync" to { startGpsSync() }
+            if (undoTrip != null || undoSimBefore != null) items += "Undo GPS Sync" to { undoSync() }
+        }
+        items += "Find me by voice" to { startVoiceLocation() }
+        items += listOf("Offline maps" to { mapsMenu() }, "Appearance" to { appearanceMenu() },
+            "Car connection" to { feedSettings() }, "Experimental navigation" to { predictionMenu() }, "Advanced tools" to { showServices() })
+        AlertDialog.Builder(this).setTitle("RouteOdo").setItems(items.map { it.first }.toTypedArray()) { _, i -> items[i].second() }.show()
+    }
+
+    private fun positionDebug() = PositionDebug.compare((predictedPosition ?: route.position(progressMeters)).coordinate, gpsFix,
         SystemClock.elapsedRealtime(), checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED)
 
     private fun refreshServices() {
         servicePanel?.takeIf { it.isShowing }?.render(ServiceState(route.name, live, tracker.state.running, starting,
             gpsPending, if (live) undoTrip != null else undoSimBefore != null, simRunning,
             (progressMeters / route.lengthMeters * 10_000).toInt().coerceIn(0, 10_000), currentFeedText, mapSummary,
-            "${formatDistance(progressMeters)} travelled · ${formatDistance(route.lengthMeters)} total", appearance.mode.name.lowercase().replaceFirstChar { it.uppercase() }))
+            "${formatDistance(progressMeters)} travelled · ${formatDistance(route.lengthMeters)} total", appearance.mode.name.lowercase().replaceFirstChar { it.uppercase() }, simulationMode))
     }
 
     private fun showServices() {
@@ -298,14 +381,16 @@ class MainActivity : Activity() {
             startStop = { if (live && tracker.state.running) stopRoute() else startRoute() },
             align = { alignDialog() }, sync = { startGpsSync() }, undo = { undoSync() }, maps = { mapsMenu() },
             positions = { debugMenu() }, apiDetails = { apiDebugMenu() }, appearance = { appearanceMenu() },
-            preview = { if (live) enterPreview() }, drive = { simRunning = !simRunning; follow = true; render() },
-            step = { delta -> simMeters = (simMeters + delta).coerceAtLeast(0.0); if (delta < 0) clearUndo(); render(); persist() },
-            seek = { value -> simMeters = route.lengthMeters * value / 10_000.0; clearUndo(); render() },
+            preview = { enterPreview() }, drive = { if (!simulationMode) enterPreview(); simRunning = !simRunning; follow = true; render() },
+            step = { delta -> if (!simulationMode) enterPreview(); simMeters = (simMeters + delta).coerceAtLeast(0.0); if (delta < 0) clearUndo(); render(); persist() },
+            seek = { value -> if (!simulationMode) enterPreview(); simMeters = route.lengthMeters * value / 10_000.0; clearUndo(); render() },
             seekStart = { simRunning = false }, seekStop = { persist() })).also { it.show() }
         refreshServices()
     }
 
     private fun enterPreview() {
+        resetPrediction(stop = true)
+        routeSelected = true; simulationMode = true
         if (live) simMeters = tracker.state.progressMeters
         live = false; tracker.stop(); carFeed.stop(); starting = false; generation++; polling = false
         simRunning = false; clearUndo(); persist(); render()
@@ -330,6 +415,7 @@ class MainActivity : Activity() {
             View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or if (palette.night) 0 else View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
         map?.uiSettings?.setCompassImage(getDrawable(if (palette.night) R.drawable.ic_compass_night else R.drawable.ic_compass_day)!!)
         drivingUi.applyAppearance(palette)
+        refreshSavedPlaces()
         if (reloadMap) loadMapStyle(false)
         render()
     }
@@ -416,6 +502,93 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun predictionMenu() {
+        val fields = column()
+        fields.addView(label("Experimental · not road tested. Secure the phone in a fixed mount. Start from a known road position and direction. GPS is never used by prediction. Backgrounding pauses motion tracking; align before resuming.", 14f, muted))
+        val enabled = Switch(this).apply {
+            text = "Predict roads and recalculate offline"; isChecked = predictionEnabled
+            setOnCheckedChangeListener { _, checked ->
+                predictionEnabled = checked
+                getSharedPreferences("settings", MODE_PRIVATE).edit().putBoolean("roadPrediction", checked).apply()
+                resetPrediction(); render()
+            }
+        }
+        fields.addView(enabled)
+        fields.addView(label(predictionStatus, 14f, ink))
+        fields.addView(label("Requires a directed road graph with legal driving connections. Map tile downloads are display data only. Import roads around your route before driving. When uncertain, guidance holds until you align.", 14f, muted))
+        fields.addView(button("Import offline road graph (JSON)") {
+            startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply { type = "application/json"; addCategory(Intent.CATEGORY_OPENABLE) }, 13)
+        })
+        AlertDialog.Builder(this).setTitle("Experimental navigation").setView(fields).setPositiveButton("Done", null).show()
+    }
+
+    private fun resetPrediction(stop: Boolean = false) {
+        motion.stop(); predictor = null; predictedPosition = null; predictionFault = false; predictionConfident = false
+        predictionTravel = tracker.state.confirmedTravelMeters; predictionEpoch = tracker.state.baseEpoch
+        lastPredictionRouteAt = 0
+        predictionStatus = when {
+            !predictionEnabled -> "Experimental prediction off"
+            roadGraph == null -> "Prediction unavailable · import offline roads"
+            stop || !active || !live || !tracker.state.running -> "Experimental prediction paused"
+            !motion.start() -> "Prediction unavailable · gyro/gravity sensors missing"
+            else -> "Experimental · waiting for motion and odometer"
+        }
+    }
+
+    private fun updatePrediction(sample: CarSample, accepted: Boolean) {
+        if (!predictionEnabled || roadGraph == null || !tracker.state.running) return
+        predictionConfident = false
+        val turn = motion.consume()
+        if (predictionFault) return
+        if (!accepted || !sample.anchorFresh || tracker.state.blockedReason != null ||
+            predictionEpoch != null && predictionEpoch != sample.epoch) {
+            predictionFault = true; predictionStatus = "Prediction paused · distance gap; align position"
+            return
+        }
+        predictionEpoch = sample.epoch
+        if (!motion.ready) {
+            if (tracker.state.confirmedTravelMeters == predictionTravel) {
+                predictionStatus = "Experimental · waiting for motion sensors"; return
+            }
+            predictionFault = true; predictionStatus = "Prediction paused · motion unavailable; align position"
+            return
+        }
+        val graph = roadGraph ?: return
+        if (predictor == null) {
+            val start = route.position(progressMeters)
+            predictor = RoadPredictor(graph, start.coordinate, start.bearing)
+            predictionTravel = tracker.state.confirmedTravelMeters
+        }
+        val delta = (tracker.state.confirmedTravelMeters - predictionTravel) * tracker.state.scale
+        predictionTravel = tracker.state.confirmedTravelMeters
+        val engine = predictor ?: return
+        val estimate = engine.advance(delta.coerceAtLeast(0.0), turn)
+        if (estimate == null) {
+            predictionFault = true; predictionStatus = "Prediction lost road coverage · align position"; return
+        }
+        predictedPosition = estimate.position
+        predictionStatus = "Experimental road estimate · ${(estimate.confidence * 100).roundToInt()}% confidence"
+        if (estimate.confidence < 0.8) {
+            predictionStatus = "Experimental · ambiguous road; guidance held"
+            return
+        }
+        predictionConfident = true
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastPredictionRouteAt < 5000) return
+        val best = engine.best ?: return
+        val destination = routeDetails?.destination?.coordinate ?: route.points.last()
+        val recalculated = graph.route(best, destination)
+        if (recalculated == null) {
+            predictionConfident = false
+            predictionStatus = "Experimental · no offline path to destination"; return
+        }
+        // Keep odometer/session anchors intact; only route alignment changes.
+        route = recalculated
+        val smoothingOffset = (tracker.state.displayedTravelMeters - tracker.state.confirmedTravelMeters) * tracker.state.scale
+        tracker.anchor(sample, smoothingOffset.coerceAtLeast(0.0))
+        clearUndo(); lastPredictionRouteAt = now; schedulePersist()
+    }
+
     private fun vehicleScale(url: String = apiUrl): Double = getSharedPreferences("settings", MODE_PRIVATE)
         .getString("scale:$url", "1.0")?.toDoubleOrNull()?.takeIf { it in 0.5..1.5 } ?: 1.0
 
@@ -425,7 +598,7 @@ class MainActivity : Activity() {
         carFeed.start(apiUrl, bearerToken, tryLanFirst, retryAuth)
     }
 
-    private fun feedSettings() {
+    private fun feedSettings(startAfterSave: Boolean = false) {
         val fields = column()
         val url = input("Distance API URL", apiUrl, InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI)
         val token = input("Bearer token (optional)", bearerToken, InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD)
@@ -435,8 +608,7 @@ class MainActivity : Activity() {
         fields.addView(label(LAN_ODOMETER_URL, 12f, muted))
         fields.addView(url); fields.addView(token)
         val dialog = AlertDialog.Builder(this).setTitle("Odometer API").setView(fields)
-            .setPositiveButton("Use API", null).setNeutralButton("Preview") { _, _ -> enterPreview()
-            }.setNegativeButton("Cancel", null).create()
+            .setPositiveButton(if (startAfterSave) "Connect & start" else "Save connection", null).setNegativeButton("Cancel", null).create()
         dialog.setOnShowListener { dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
             runCatching {
                 val endpoint = url.text.toString().trim().toHttpUrl()
@@ -452,15 +624,18 @@ class MainActivity : Activity() {
                 latest = null; lastAcceptedAt = SystemClock.elapsedRealtime(); generation++; polling = false
                 feedMessage = "Connecting to odometer API · press Start route to begin"
                 getSharedPreferences("settings", MODE_PRIVATE).edit().putString("apiUrl", apiUrl).putBoolean("tryLanFirst", tryLanFirst).apply()
-                persist(); render(); connectCar(retryAuth = true); dialog.dismiss()
+                simulationMode = false
+                persist(); render(); dialog.dismiss()
+                if (startAfterSave) startRoute() else connectCar(retryAuth = true)
             }.onFailure { url.error = it.message ?: "Invalid API settings" }
         } }
         dialog.show()
     }
 
     private fun routeMenu() {
-        AlertDialog.Builder(this).setTitle(route.name).setItems(arrayOf("Plan route / saved places", "Fit route on map", "Start route from zero", "Load Kyiv example", "Import route JSON", "Export route JSON")) { _, which ->
+        AlertDialog.Builder(this).setTitle(route.name).setItems(arrayOf("Plan route / saved places", "Fit route on map", "Start route from zero", "Load Kyiv example", "Import route JSON", "Export route JSON", "Search & routing services")) { _, which ->
             when (which) {
+                6 -> routeServices()
                 0 -> planRoute()
                 1 -> { follow = false; fitRoute(); render() }
                 2 -> startRoute()
@@ -472,57 +647,79 @@ class MainActivity : Activity() {
         }.show()
     }
 
-    private fun planRoute() {
+    private fun planRoute(destination: Place? = null, edit: Boolean = false) {
+        draftStart = if (edit) routeDetails?.start else null
+        draftEnd = destination ?: if (edit) routeDetails?.destination else null
+        openPlanner(draftStart, draftEnd)
+    }
+
+    private fun openPlanner(start: Place?, end: Place?) {
         planner?.dismiss()
-        planner = RoutePlanner(this, network, workers, routingUrl, geocodingUrl, selectedStart, selectedEnd,
+        val focus = map?.cameraPosition?.target?.let { Coordinate(it.latitude, it.longitude) } ?: KYIV_CENTER
+        planner = RoutePlanner(this, network, workers, routingUrl, geocodingUrl, start, end, focus, palette,
             freshGps = { positionDebug().gps }, requestPermission = { requestGpsPermission(22) },
-            saveServices = { routing, geocoding ->
-                routingUrl = routing; geocodingUrl = geocoding
-                getSharedPreferences("settings", MODE_PRIVATE).edit().putString("routingUrl", routing)
-                    .putString("geocodingUrl", geocoding).apply()
-            }, ready = { newRoute ->
-                replaceRoute(newRoute)
-                AlertDialog.Builder(this).setTitle("Route ready · ${formatDistance(newRoute.lengthMeters)}")
-                    .setMessage("Review the route on the map. When you are at the start, press Start route to set the odometer baseline. Maps lets you save this route or the Kyiv area for offline use.")
-                    .setPositiveButton("View route", null).setNeutralButton("Odometer API") { _, _ -> feedSettings() }.show()
-            }).also { it.show() }
+            pickOnMap = { isStart, a, b ->
+                draftStart = a; draftEnd = b; pickingStart = isStart; follow = false; render()
+            }, closed = { refreshSavedPlaces() }, ready = { planned -> replaceRoute(planned.route, planned.details) }).also { it.show() }
+    }
+
+    private fun routeServices() {
+        val fields = column()
+        val routing = input("Routing service (OSRM)", routingUrl, InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI)
+        val geocoding = input("Place search (Photon)", geocodingUrl, InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI)
+        fields.addView(routing); fields.addView(geocoding)
+        val dialog = AlertDialog.Builder(this).setTitle("Search & routing services").setView(fields)
+            .setPositiveButton("Save", null).setNegativeButton("Cancel", null).create()
+        dialog.setOnShowListener { dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            runCatching {
+                val a = routing.text.toString().trim().toHttpUrl(); val b = geocoding.text.toString().trim().toHttpUrl()
+                require(listOf(a, b).all { it.isHttps && it.username.isEmpty() && it.password.isEmpty() && it.query == null && it.fragment == null }) { "Use plain HTTPS service URLs" }
+                routingUrl = a.toString(); geocodingUrl = b.toString()
+                getSharedPreferences("settings", MODE_PRIVATE).edit().putString("routingUrl", routingUrl).putString("geocodingUrl", geocodingUrl).apply()
+                dialog.dismiss()
+            }.onFailure { routing.error = it.message }
+        } }; dialog.show()
     }
 
     private fun startRoute() {
-        if (apiUrl.isBlank() || bearerToken.isBlank() && apiUrl == PUBLIC_ODOMETER_URL) { feedSettings(); return }
+        if (!routeSelected) { planRoute(); return }
+        if (apiUrl.isBlank() || bearerToken.isBlank() && apiUrl == PUBLIC_ODOMETER_URL) { feedSettings(startAfterSave = true); return }
+        simulationMode = false
         live = true; simRunning = false; starting = true; clearUndo()
         tracker = TripTracker(TripState(scale = vehicleScale()))
         tracker.start()
+        resetPrediction()
         follow = true; persist(); render()
         // Restart transport so no pre-start queued response can become the new baseline.
         connectCar(retryAuth = true)
     }
 
     private fun stopRoute() {
+        resetPrediction(stop = true)
         tracker.stop(); starting = false; generation++; polling = false; clearUndo()
         feedMessage = "Navigation stopped · press Start route for a new baseline"
         persist(); render()
     }
 
-    private fun replaceRoute(newRoute: Route) {
+    private fun replaceRoute(newRoute: Route, details: RouteDetails? = null) {
+        resetPrediction(stop = true)
+        carFeed.stop(); live = false; simulationMode = false; routeSelected = true; routeDetails = details; pickingStart = null
         route = newRoute; tracker = TripTracker(TripState(scale = vehicleScale())); simMeters = 0.0; simRunning = false; starting = false
         clearUndo(); latest = null; lastAcceptedAt = 0; generation++; polling = false
         selectedStart = null; selectedEnd = null; follow = false
-        offline.select(route); drawRoute(); fitRoute(); render(); persist()
+        offline.select(route); render(); drivingUi.post { fitRoute() }; persist()
     }
 
     private fun selectPoint(point: Coordinate) {
-        AlertDialog.Builder(this).setTitle(String.format(Locale.US, "%.5f, %.5f", point.latitude, point.longitude))
-            .setItems(arrayOf("Set route start", "Set destination", "Align marker here")) { _, which ->
-                when (which) {
-                    0 -> { selectedStart = point; toast("Start selected · choose destination, then Route") }
-                    1 -> { selectedEnd = point; planRoute() }
-                    2 -> {
-                        val projection = route.project(point).first()
-                        alignTo(projection.progressMeters)
-                    }
-                }
-            }.show()
+        val place = Place("Pinned location", point)
+        pickingStart?.let { isStart ->
+            if (isStart) draftStart = place else draftEnd = place
+            pickingStart = null; render(); openPlanner(draftStart, draftEnd); return
+        }
+        val items = mutableListOf("Directions here" to { planRoute(place) },
+            "Start here" to { draftStart = place; draftEnd = null; openPlanner(place, null) })
+        if (journey().guiding) items += "Align marker here" to { alignTo(route.project(point).first().progressMeters); Unit }
+        AlertDialog.Builder(this).setTitle("Pinned location").setItems(items.map { it.first }.toTypedArray()) { _, which -> items[which].second() }.show()
     }
 
     private fun alignDialog() {
@@ -549,6 +746,7 @@ class MainActivity : Activity() {
             tracker.anchor(sample, meters, scale)
             getSharedPreferences("settings", MODE_PRIVATE).edit().putString("scale:$apiUrl", scale.toString()).apply()
         } else simMeters = meters
+        resetPrediction()
         clearUndo(); follow = true; persist(); render()
         return true
     }
@@ -578,7 +776,8 @@ class MainActivity : Activity() {
     private fun loadMapStyle(fit: Boolean) {
         drivingMap?.loadStyle(palette.night) {
             if (!isDestroyed) {
-                if (fit && !follow) fitRoute()
+                if (!routeSelected) centerExplore()
+                else if (fit && !journey().guiding) drivingUi.post { fitRoute() }
                 else if (follow) followState.recenter()
                 render()
             }
@@ -624,6 +823,66 @@ class MainActivity : Activity() {
         dialog.show()
     }
 
+    private fun voiceFocus(): Coordinate = when {
+        journey().guiding -> (predictedPosition ?: route.position(progressMeters)).coordinate
+        positionDebug().gps != null -> positionDebug().gps!!.coordinate
+        else -> map?.cameraPosition?.target?.let { Coordinate(it.latitude, it.longitude) } ?: KYIV_CENTER
+    }
+
+    private fun voiceTravel(): Double = if (live) tracker.state.displayedTravelMeters * tracker.state.scale else simMeters
+
+    private fun startVoiceLocation() {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 30); return
+        }
+        voiceDialog?.dismiss()
+        val routeId = route.id
+        val sessionId = tracker.state.navigationSessionId
+        val wasLive = live
+        val wasGuiding = journey().guiding
+        voiceDialog = VoiceLocationDialog(this, context = {
+            val point = voiceFocus()
+            JSONObject().put("lat", point.latitude).put("lon", point.longitude)
+                .put("source", if (journey().guiding) { if (predictedPosition != null) "experimental road estimate; may be ambiguous" else "odometer route estimate" } else if (positionDebug().gps != null) "fresh GPS" else "map center; may not be current location")
+                .put("elapsed_realtime_ms", SystemClock.elapsedRealtime()).put("travel_m", voiceTravel())
+                .put("route", if (routeSelected) route.name else JSONObject.NULL)
+                .put("progress_m", if (routeSelected) progressMeters else JSONObject.NULL)
+                .put("next_turn", if (routeSelected) route.nextTurn(progressMeters).instruction else JSONObject.NULL)
+                .put("car_feed_fresh", latest?.anchorFresh == true && SystemClock.elapsedRealtime() - latestAt < 5000)
+        }, focus = { voiceFocus() }, travel = { voiceTravel() }, geocoder = geocodingUrl, review = { candidate ->
+            if (routeId != route.id || sessionId != tracker.state.navigationSessionId || wasLive != live || wasGuiding != journey().guiding) {
+                notice("Location expired", "The route or navigation session changed. Start a new voice chat.")
+            } else reviewVoiceLocation(candidate)
+        }).also { it.show() }
+    }
+
+    private fun reviewVoiceLocation(candidate: LocationProposal) {
+        val age = SystemClock.elapsedRealtime() - candidate.atMillis
+        val moved = abs(voiceTravel() - candidate.travelMeters)
+        if (age !in 0..60000 || moved > 50) {
+            notice("Location expired", "You have moved or the observation is too old. Ask again with a landmark alongside you now."); return
+        }
+        if (journey().guiding) {
+            val nearest = route.project(candidate.place.coordinate).first().distanceFromRouteMeters
+            if (nearest > 100) {
+                notice("Landmark is away from the route", "${candidate.place.label} is ${nearest.roundToInt()} m from this route. Plan a route from this area or provide another clue."); return
+            }
+            // Reuse alignment preview with session checks, movement retention and Undo.
+            previewGps(Location("voice-estimate").apply {
+                latitude = candidate.place.coordinate.latitude; longitude = candidate.place.coordinate.longitude; accuracy = 50f
+            }, "AI location estimate · verify route point")
+        } else {
+            val capturedAt = SystemClock.elapsedRealtime()
+            AlertDialog.Builder(this).setTitle("Use estimated starting point?")
+                .setMessage("${candidate.place.label}\n\n${candidate.reason}\n\nThis is a landmark estimate. Confirm it matches where you are now.")
+                .setPositiveButton("Use as start") { _, _ ->
+                    if (SystemClock.elapsedRealtime() - capturedAt < 60000) {
+                        draftStart = candidate.place; openPlanner(candidate.place, draftEnd)
+                    }
+                }.setNegativeButton("Cancel", null).show()
+        }
+    }
+
     private fun startGpsSync() {
         if (live && freshSample() == null) return
         if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
@@ -640,6 +899,10 @@ class MainActivity : Activity() {
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 30) {
+            if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) startVoiceLocation()
+            else notice("Microphone unavailable", "Allow microphone access in Android settings to use voice chat.")
+        }
         if (requestCode == 20 || requestCode == 21 || requestCode == 22) {
             startGpsDebug()
             if (requestCode == 22) {
@@ -653,7 +916,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun previewGps(fix: Location) {
+    private fun previewGps(fix: Location, title: String? = null) {
         if (live && freshSample() == null) return
         val coordinate = runCatching { Coordinate(fix.latitude, fix.longitude) }.getOrElse {
             notice("GPS Sync", "This GPS fix is outside the map's supported latitude range."); return
@@ -668,7 +931,7 @@ class MainActivity : Activity() {
         val capturedAt = SystemClock.elapsedRealtime()
         var selected = 0
         val labels = choices.map { "${formatDistance(it.progressMeters)} from start · ${it.distanceFromRouteMeters.roundToInt()} m off route" }.toTypedArray()
-        AlertDialog.Builder(this).setTitle("GPS Sync · accuracy ±${fix.accuracy.roundToInt()} m")
+        AlertDialog.Builder(this).setTitle(title ?: "GPS Sync · accuracy ±${fix.accuracy.roundToInt()} m")
             .setSingleChoiceItems(labels, 0) { _, choice -> selected = choice }
             .setPositiveButton("Apply sync") { _, _ ->
                 if (capturedRoute != route.id || capturedLive != live || SystemClock.elapsedRealtime() - capturedAt > 60_000) {
@@ -687,6 +950,7 @@ class MainActivity : Activity() {
                 } else {
                     undoSimBefore = simMeters; undoSimAfter = target; simMeters = target
                 }
+                resetPrediction()
                 follow = true; persist(); render(); toast("GPS alignment applied · Undo Sync is available")
             }.setNegativeButton("Cancel", null).show()
     }
@@ -701,6 +965,7 @@ class MainActivity : Activity() {
                 val after = undoSimAfter ?: return
                 simMeters = (before + simMeters - after).coerceAtLeast(0.0)
             }
+            resetPrediction()
             clearUndo(); follow = true; persist(); render(); toast("Previous alignment restored")
         }.onFailure { notice("Could not undo sync", it.message ?: "Align the route manually") }
     }
@@ -714,7 +979,33 @@ class MainActivity : Activity() {
         val uri = data?.data ?: return
         workers.execute {
             val result = runCatching {
-                if (requestCode == 11) {
+                if (requestCode == 13) {
+                    val raw = contentResolver.openInputStream(uri)!!.use { stream ->
+                        val output = java.io.ByteArrayOutputStream()
+                        val buffer = ByteArray(8192)
+                        while (true) {
+                            val count = stream.read(buffer)
+                            if (count < 0) break
+                            require(output.size() + count <= 10 * 1024 * 1024) { "Road graph exceeds 10 MB" }
+                            output.write(buffer, 0, count)
+                        }
+                        output.toString("UTF-8")
+                    }
+                    val graph = RoadGraphCodec.read(raw)
+                    val file = android.util.AtomicFile(java.io.File(filesDir, "roads.json"))
+                    val output = file.startWrite()
+                    try {
+                        output.write(raw.toByteArray(Charsets.UTF_8)); file.finishWrite(output)
+                    } catch (failure: Exception) {
+                        file.failWrite(output); throw failure
+                    }
+                    handler.post {
+                        if (!isDestroyed) {
+                            roadGraph = graph; resetPrediction(); render(); toast("Offline road graph imported")
+                        }
+                    }
+                    return@execute
+                } else if (requestCode == 11) {
                     val raw = contentResolver.openInputStream(uri)!!.use { stream ->
                         val output = java.io.ByteArrayOutputStream()
                         val buffer = ByteArray(8192)
@@ -742,14 +1033,20 @@ class MainActivity : Activity() {
     override fun onStart() { super.onStart(); mapView.onStart() }
     override fun onResume() {
         super.onResume(); mapView.onResume(); active = true
-        if (live) connectCar()
+        if (live) { starting = tracker.state.running && tracker.state.baseM == null; connectCar() }
         handler.removeCallbacks(tick); handler.post(tick)
-        startGpsDebug()
+        resetPrediction()
+        if (predictionEnabled && live && tracker.state.baseM != null) {
+            predictionFault = true; predictionStatus = "Prediction paused · align after resuming app"
+        }
+        startGpsDebug(); planner?.resume(); refreshSavedPlaces()
         if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED &&
             !getSharedPreferences("settings", MODE_PRIVATE).getBoolean("gpsPermissionRequested", false)) requestGpsPermission(21)
     }
     override fun onPause() {
+        voiceDialog?.dismiss(); voiceDialog = null
         active = false; starting = false; planner?.pause(); generation++; polling = false; gps.cancel(); gpsPending = false; simRunning = false
+        resetPrediction(stop = true)
         gpsDebug.stop(); gpsFix = null; carFeed.stop()
         handler.removeCallbacks(tick); persist(); mapView.onPause(); super.onPause()
     }

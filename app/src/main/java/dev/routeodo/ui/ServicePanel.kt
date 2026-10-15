@@ -15,7 +15,7 @@ import android.widget.*
 
 data class ServiceState(val routeName: String, val live: Boolean, val running: Boolean, val starting: Boolean,
     val gpsPending: Boolean, val undoAvailable: Boolean, val previewRunning: Boolean, val fraction: Int,
-    val feed: String, val maps: String, val progress: String, val appearance: String)
+    val feed: String, val maps: String, val progress: String, val appearance: String, val simulation: Boolean = false)
 
 data class ServiceActions(val route: () -> Unit, val api: () -> Unit, val retry: () -> Unit,
     val startStop: () -> Unit, val align: () -> Unit, val sync: () -> Unit, val undo: () -> Unit,
@@ -25,7 +25,7 @@ data class ServiceActions(val route: () -> Unit, val api: () -> Unit, val retry:
 
 /** Local service screen. It delegates every navigation/configuration operation to the existing flow. */
 class ServicePanel(context: Context, private val palette: DrivingPalette, private val actions: ServiceActions) :
-    Dialog(context, if (palette.night) android.R.style.Theme_Material_NoActionBar else android.R.style.Theme_Material_Light_NoActionBar) {
+    Dialog(context, if (palette.night) dev.routeodo.R.style.AppThemeNight else dev.routeodo.R.style.AppTheme) {
     private val content = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(8), dp(20), dp(24)) }
     private val routeName = text(17f, true)
     private val feed = text(13f)
@@ -34,7 +34,7 @@ class ServicePanel(context: Context, private val palette: DrivingPalette, privat
     private val sync = button("GPS Sync") { exit(actions.sync) }
     private val undo = button("Undo Sync") { exit(actions.undo) }
     private val appearance = button("Appearance") { exit(actions.appearance) }
-    private val preview = button("Enter Preview") { actions.preview() }
+    private val preview = button("Start simulation") { actions.preview() }
     private val previewControls = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
     private val drive = button("Drive") { actions.drive() }
     private val previewProgress = text(13f)
@@ -52,8 +52,8 @@ class ServicePanel(context: Context, private val palette: DrivingPalette, privat
         }
         val header = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(10), dp(20), dp(8)) }
         header.addView(button("‹  Back to map") { dismiss() })
-        header.addView(text(28f, true).apply { text = "Services"; setPadding(0, dp(14), 0, dp(4)) })
-        header.addView(text(13f).apply { text = "RouteOdo · tools for this drive" })
+        header.addView(text(28f, true).apply { text = "Advanced tools"; setPadding(0, dp(14), 0, dp(4)) })
+        header.addView(text(13f).apply { text = "Connection, calibration and testing" })
         root.addView(header)
         root.addView(ScrollView(context).apply { isFillViewport = true; addView(content) }, LinearLayout.LayoutParams(-1, 0, 1f))
         setContentView(root)
@@ -79,7 +79,7 @@ class ServicePanel(context: Context, private val palette: DrivingPalette, privat
         action("Offline & online maps", "Route / Kyiv packs · pause, resume, refresh, remove", actions.maps)
         action("Position details / Show both", "Raw GPS · odometer position · separation · GPS settings", actions.positions)
         content.addView(appearance)
-        section("PREVIEW")
+        section("SIMULATION")
         content.addView(text(13f).apply { text = "Simulated movement is separate from the real car feed." })
         content.addView(preview)
         previewControls.addView(previewProgress); previewControls.addView(slider)
@@ -127,8 +127,8 @@ class ServicePanel(context: Context, private val palette: DrivingPalette, privat
         start.updateText(if (state.starting) "Cancel start" else if (state.live && state.running) "Stop route" else "Start route")
         sync.updateText(if (state.gpsPending) "Getting GPS…" else "GPS Sync"); sync.isEnabled = !state.gpsPending && (!state.live || state.running)
         undo.isEnabled = state.undoAvailable
-        preview.updateText(if (state.live) "Enter Preview" else "PREVIEW MODE · simulated position")
-        previewControls.visibility = if (state.live) View.GONE else View.VISIBLE
+        preview.updateText(if (state.simulation) "SIMULATION · simulated position" else "Start simulation")
+        previewControls.visibility = if (state.simulation) View.VISIBLE else View.GONE
         drive.updateText(if (state.previewRunning) "Pause" else "Drive")
         if (slider.progress != state.fraction) slider.progress = state.fraction
         previewProgress.updateText(state.progress)

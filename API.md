@@ -71,7 +71,7 @@ Send at most ten samples per second. Keepalive comments every 15 seconds are tra
 
 ## Local navigation calculation
 
-In version 0.4, Start/Stop, GPS Sync/Undo, API settings, calibration, and preview are accessed through **Services**. The protocol and navigation engine remain unchanged.
+In version 0.5, Start/Stop are directly on the map. GPS Sync/Undo and Car connection are in **Menu**; calibration, diagnostics, and simulation are under **Menu → Advanced tools**. The protocol and navigation engine remain unchanged.
 
 **Start route** creates a local navigation session. Its first connected, fresh, non-null odometer sample becomes `base_epoch` and `base_m`, with progress zero. Connecting the API alone does not start navigation.
 
@@ -96,7 +96,7 @@ distance_along_route = route_anchor
                      + scale * (displayed_travel - travel_anchor)
 ```
 
-At route start both alignment anchors are zero. The default scale is 1.0; **Services → Align & calibration** allows 0.5–1.5 and persists it by the configured vehicle endpoint, shared across LAN/public transport. GPS Sync sets new route/travel alignment anchors. Undo restores the previous alignment while retaining all subsequent distance and car epoch changes. Route geometry converts distance along the polyline to the calculated map coordinate and route bearing. The car API supplies neither.
+At route start both alignment anchors are zero. The default scale is 1.0; **Menu → Advanced tools → Align & calibration** allows 0.5–1.5 and persists it by the configured vehicle endpoint, shared across LAN/public transport. GPS Sync sets new route/travel alignment anchors. Undo restores the previous alignment while retaining all subsequent distance and car epoch changes. Route geometry converts distance along the polyline to the calculated map coordinate and route bearing. The car API supplies neither.
 
 The route, local session, epoch/baseline, carried distance, display hold, gap markers, scale, and undo snapshot persist. Stream-driven saves are coalesced to once per second; explicit alignment and lifecycle changes save immediately. An app restart resumes a running local session. **Stop route** freezes navigation; another Start route creates a new baseline at route distance zero.
 
@@ -117,7 +117,7 @@ All acquisition ages use `t` from the latest response, never the phone’s wall 
 
 ## Token storage
 
-Both endpoint defaults are included in the app. Enter the token in **Services → API & connection → Bearer token → Use API**. It is stored as AES-GCM encrypted preferences using an Android Keystore key. It is never placed in URLs, logged, sent to address/routing/map providers, or embedded in source/APK defaults. App backup is disabled. Redirects are rejected.
+Both endpoint defaults are included in the app. Enter the token in **Menu → Car connection → Bearer token → Save connection**. It is stored as AES-GCM encrypted preferences using an Android Keystore key. It is never placed in URLs, logged, sent to address/routing/map providers, or embedded in source/APK defaults. App backup is disabled. Redirects are rejected.
 
 Bearer tokens are allowed over HTTPS or exactly the car’s HTTP host/port/path above (including its stream). Release Android network configuration permits cleartext only to that LAN host. Debug builds also permit unauthenticated local HTTP test servers.
 

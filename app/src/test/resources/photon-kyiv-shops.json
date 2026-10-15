@@ -1,0 +1,95 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "osm_type": "W",
+        "osm_id": 469497558,
+        "osm_key": "shop",
+        "osm_value": "supermarket",
+        "type": "house",
+        "housenumber": "1-А",
+        "name": "Сільпо",
+        "street": "Спортивна площа",
+        "locality": "Левашовська Гора",
+        "district": "Клов",
+        "city": "Київ",
+        "country": "Україна",
+        "postcode": "01023",
+        "countrycode": "UA",
+        "extent": [
+          30.5230859,
+          50.4389531,
+          30.5236222,
+          50.4385726
+        ]
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          30.5233431,
+          50.4387768
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "osm_type": "N",
+        "osm_id": 7723483988,
+        "osm_key": "shop",
+        "osm_value": "supermarket",
+        "type": "house",
+        "housenumber": "56-А",
+        "name": "Сільпо",
+        "street": "Ярославська вулиця",
+        "locality": "Плоське",
+        "district": "Поділ",
+        "city": "Київ",
+        "country": "Україна",
+        "postcode": "04070",
+        "countrycode": "UA"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          30.5177753,
+          50.4715355
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "osm_type": "W",
+        "osm_id": 286538824,
+        "osm_key": "shop",
+        "osm_value": "supermarket",
+        "type": "house",
+        "housenumber": "3",
+        "name": "Сільпо",
+        "street": "Оленівська вулиця",
+        "locality": "Плоське",
+        "district": "Поділ",
+        "city": "Київ",
+        "country": "Україна",
+        "postcode": "03080",
+        "countrycode": "UA",
+        "extent": [
+          30.5020493,
+          50.4717316,
+          30.5027152,
+          50.4712688
+        ]
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          30.5023823,
+          50.4714819
+        ]
+      }
+    }
+  ]
+}

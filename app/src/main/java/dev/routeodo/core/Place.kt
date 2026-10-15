@@ -1,7 +1,9 @@
 package dev.routeodo.core
 
-data class Place(val label: String, val coordinate: Coordinate) {
+data class Place(val label: String, val coordinate: Coordinate, val category: String? = null) {
     init { require(label.isNotBlank()) }
+    val title: String get() = label.substringBefore(',')
+    val subtitle: String get() = label.substringAfter(',', "").trim()
 }
 
 /** Editing a query invalidates both its selection and any older asynchronous search response. */

@@ -2,42 +2,47 @@
 
 Android navigation along a selected driving route using the vehicle odometer, assuming the driver follows that route. GPS is optional: it can be displayed for comparison or explicitly used to correct the alignment. Android 8.0+ (API 26), Kotlin, MapLibre, and OpenStreetMap data.
 
-Version **0.4.0** adds a fullscreen driving interface, bundled day/night maps, a directional calculated-position chevron, and an independent raw GPS dot with an accuracy circle. All car transport and positioning behavior from 0.3 is retained. [UI design and preserved flows](docs/DRIVING_UI.md).
+Version **0.5.0** makes everyday use map-first: live place search, saved-place shortcuts, an on-map route preview, and Start/Stop directly on the map. Day/night maps, independent GPS comparison, local storage, offline packs, and the existing odometer engine are retained. [Verification](docs/VERIFICATION_0.5.0.md).
 
-## Driving screen and Services
+## Find a place and drive
 
-The map fills the screen behind a large maneuver card, a compact GPS comparison, and the speed/source/remaining-distance panel. The blue route has a dark outline; its travelled portion is muted. Follow uses calculated route bearing at a 48° tilt. Dragging, rotating, or pinching the map suspends follow; **Recenter** restores it. GPS never controls the follow camera.
+1. A fresh installation opens the Kyiv map. Tap **Where to?** and type an address, shop, café, landmark, or other place name. Suggestions update while typing; no Search button is required. Try `Сільпо` or `Хрещатик 22, Київ`.
+2. Select a result. A fresh available GPS fix supplies **Your location** as the starting point. Without GPS, search the **Starting point** field, choose a saved place, or use **Choose on map**, then long-press the desired point. GPS is optional throughout.
+3. Once both places are selected, the app calculates the route and returns to the map. Review the destination, estimated driving time (without traffic), distance, and origin. **Edit route** lets you change either place or swap them. A saved shortcut or map-picked pair can also be confirmed with **Preview route**.
+4. Tap **Start** on the map. On first use, enter the car bearer token in the connection dialog and choose **Connect & start**. Later starts use the saved settings. The first fresh odometer reading establishes the new local session baseline.
+5. Keep the app in the foreground. The calculated chevron follows the route as the odometer increases. **Stop** ends the session and returns to the browsing map. Reconnection in the same car epoch catches up; a runtime restart rebases and marks a distance gap.
 
-**Services** opens a separate screen with **Back to map** at the top. All prior controls remain available there: Route & saved places, Start/Stop route, GPS Sync/Undo, Align & calibration, API & connection, Retry, API diagnostics, Offline & online maps, Position details / Show both, Appearance, and Preview with its slider/Drive/±100 m controls. Map long-press start/destination/alignment selection still works.
+The main map shows only the search/preview controls or, while navigating, the next maneuver, speed, remaining distance, Stop, compact GPS comparison, and actionable connection warnings. Dragging, rotating, or pinching suspends the calculated-position follow camera; **Recenter** restores it. In browsing mode, Recenter shows GPS if available or Kyiv; in route preview it fits the route.
 
-Choose **Services → Appearance → System / Day / Night**. The choice persists locally. Styles and new application icons are bundled with the APK. Existing map pack identities and their resource manifests are retained, so day/night appearance shares the same offline tile/font storage. Neither style needs a RouteOdo style server.
+**Menu (⋯)** provides New route, Saved places, GPS Sync/Undo during a drive, Offline maps, Appearance, Car connection, and Advanced tools. **Menu → Advanced tools** retains the detailed connection/position diagnostics, Align & calibration, retry, route import/export, provider settings, and simulation slider/Drive/±100 m controls. Every tools screen has a way back to the map.
 
-The source label **ODO + GPS** means odometer positioning with live GPS displayed for comparison; it does not mean automatic GPS correction. **GPS stale**, **CAR OFFLINE**, **API CONNECTING**, and **PREVIEW** are explicit states. Unknown/stale speed shows a dash. Preview speed is simulated and labeled as such.
+To try a route without the car, choose **Advanced tools → Start simulation**. If no route is selected, this uses the bundled Kyiv example. Simulation has a persistent purple label and **Exit** on the map. Planning or previewing a real route does not start simulated movement.
 
-## Plan and test a real route
+Long-press the browsing map for **Directions here** or **Start here**. During navigation, manual alignment is also available. Alignment requires a fresh odometer reading in a running car session. No GPS correction happens automatically.
 
-1. Install the latest debug APK over the existing app. On first use, the map shows a real 6.1 km Kyiv driving route from the railway station area to Podil. Updating an old Berlin demo switches it to Kyiv; your own saved route is retained.
-2. Choose **Services → Route & saved places → Plan route / saved places**. Type a street, number, and city for **A**, press Search, and select the matching result. For example: `Хрещатик 22, Київ`. You can instead use **Use current GPS for A** or pick a previously saved place.
-3. Search for **B** and select it. For example: `Володимирська 60, Київ`. Search results include the full address so you can distinguish matching streets in different cities. Search supports local names and Latin spellings; coverage depends on OpenStreetMap.
-4. Press **Calculate route** and review it on the map. Route calculation uses real road geometry and driving maneuvers. The app saves the route automatically.
-5. Open **Services → API & connection**, enter your bearer token, and keep the prefilled public endpoint and **Try car LAN first** enabled. At the route start, press **Services → Start route**. It obtains a fresh reading and begins a local navigation session at route distance zero. Connecting the API alone does not move the marker.
-6. Keep the app in the foreground. Odometer increases move the green marker and update the next-turn display. **Stop route** ends navigation; Start route again establishes a new baseline. A running session resumes across app restarts. Reconnection in the same car epoch catches up from the odometer; a car runtime restart rebases and marks a distance gap.
+Choose **Menu → Appearance → System / Day / Night**. The setting, bundled styles/icons, and offline resource identities remain local and compatible with earlier installations. Your saved route and running session survive upgrades; a fresh installation does not open a demo drive.
 
-You can inspect any calculated route without the vehicle: open **Services → Preview**, then use Drive, the slider, or +100 m. The PREVIEW badge distinguishes simulated movement from the actual odometer feed. Planning a real route does not require using the simulator.
+## Saved places and live search
 
-Long-pressing the map still offers **Set route start**, **Set destination**, and **Align marker here**. **Align** accepts metres along the route and a calibration multiplier from 0.5 to 1.5. API mode requires a started route and a fresh odometer reading for alignment.
+Tap **☆** beside a suggestion to save **Home**, **Work**, or any custom name. Saved places appear above search results and as shortcuts on the browsing map. They can supply either endpoint. Long-press a saved row in search to remove it; saving an existing name updates it.
 
-## Saved places
+Search starts after two characters, waits 400 ms after typing, and starts requests at least 1.1 seconds apart. It asks Photon for up to 15 nearby suggestions and caches matching query/location results for ten minutes in memory. Cancelled or older responses cannot replace the latest query. Results show names, categories, addresses, and straight-line proximity; availability and matching depend on OpenStreetMap/Photon. This is not Google's business catalogue and will not find every place Google Maps lists.
 
-After selecting an address or GPS start, press **Save address** and name it **Home**, **Work**, or any custom name. **Saved places** is available for both A and B. Saving the same name updates that place. The saved-place picker also allows removal.
+Saved names, addresses, and coordinates persist locally across app restarts and updates. Selecting a saved place requires no geocoding or internet, but calculating a new route still needs internet. Search errors leave saved-place choices available. There is no account, telemetry, trip history, or cloud synchronization.
 
-Names, addresses, and coordinates stay on the device across app restarts and updates. Choosing a saved place needs no geocoding request and works offline. Calculating a new driving route between saved places still needs internet. There is no Google account or cross-device synchronization in this version.
+## Find your position by voice (prototype)
+
+Choose **Menu → Find me by voice**, allow microphone access, enter your own OpenAI API key, and tap **Start voice chat**. Describe nearby signs, shops, streets or junctions in your language. The agent uses the approximate route/odometer position (or fresh GPS/map center when browsing), requests nearby OpenStreetMap/Photon matches, and asks follow-up questions. This requires internet and a billed API account. The model field is configurable for account availability.
+
+A proposed landmark appears in the dialog. **Review proposed location** ends voice capture and opens an explicit confirmation. During navigation this uses route alignment preview and Undo; while browsing it can supply the route's starting point. A past sighting or street name alone is insufficient for a point correction: this prototype asks for a landmark alongside you now. It does not infer a new road after leaving the selected route.
+
+The key is encrypted in Android Keystore-backed storage, separately from the car token. **Forget key** removes it. Voice, conversation and location context go to OpenAI; named-place queries go to the configured Photon service. Audio is not saved locally. Closing, ending, or backgrounding stops the session and microphone. Photon requires no key for light testing. Provider-specific paid search adapters and a production backend for short-lived voice credentials are future work. See [voice integration details and verification](docs/AI_LOCATION.md).
 
 ## Online maps and offline downloads
 
 The map normally loads and caches data automatically over the internet. You do not need to download Kyiv before browsing it. These are map-data updates from the provider, not traffic updates or immediate propagation of every OpenStreetMap edit.
 
-**Services → Offline & online maps** provides two independent downloads:
+**Menu → Offline maps** provides two independent downloads:
 
 | Pack | Coverage | Detail |
 | --- | --- | --- |
@@ -73,7 +78,7 @@ Allow **precise location while using the app** to see GPS debugging. The app use
 - **Blue dot and accuracy circle:** always at the fresh raw GPS coordinate, even within 50 m. An expanded blue ring remains visible under the chevron when their screen footprints overlap. A subtle line connects separated markers.
 - **Older than five seconds:** GPS is hidden and marked stale until a fresh fix returns.
 
-The comparison card shows separation and GPS accuracy in real time. Tap it for both coordinates and **Show both**, which fits both markers on screen. Follow returns the camera to the calculated position. Reported accuracy never changes either coordinate. There is no geographic merge threshold.
+The compact comparison row shows separation and GPS accuracy in real time. Tap it for both coordinates and **Show both**, which fits both markers on screen. Recenter returns the camera to the calculated position. Reported accuracy never changes either coordinate. There is no geographic merge threshold.
 
 **GPS Sync** uses an independent fresh GPS request and shows a route-alignment preview. Choose the intended route occurrence at crossings or loops, then Apply sync. Distance driven while the preview is open is retained. No correction happens automatically.
 
@@ -87,11 +92,11 @@ GPS fixes and API responses arrive independently, so correction accuracy also de
 
 Default services need no API keys for light personal testing:
 
-- [Photon](https://photon.komoot.io/) for address lookup. Searches occur only when you press Search, are throttled locally, and repeated queries are cached for ten minutes. Results favor Kyiv but can include other cities; select the intended address. The public service offers no availability guarantee and limits extensive use.
+- [Photon](https://photon.komoot.io/) for live address and place suggestions. Searches are debounced, throttled, cancellable, and cached for ten minutes. Results favor the chosen origin or map area; include the city to disambiguate. The public service offers no availability guarantee and limits extensive use.
 - [OSRM](https://project-osrm.org/docs/v5.24.0/api/) for driving routes. Its public server is for testing and community use.
 - [OpenFreeMap](https://openfreemap.org/) for the OpenStreetMap-derived vector map, rendered by [MapLibre Native](https://maplibre.org/maplibre-native/android/api/).
 
-Change Photon and OSRM base URLs under **Services → Route & saved places → Plan route / saved places → Search and route service settings**. Use suitable hosted or self-managed services before wider deployment. Odometer credentials are not sent to these services. OpenStreetMap attribution remains available on the map and in the address form.
+Change Photon and OSRM base URLs under **Menu → Advanced tools → Route & saved places → Search & routing services**. Use suitable hosted or self-managed services before wider deployment. Odometer credentials are not sent to these services. OpenStreetMap attribution remains available on the map and in the address form.
 
 Use Android Studio with JDK 17 and SDK 36, or:
 
@@ -106,10 +111,26 @@ Enter the bearer token through the API screen. Tokens are encrypted using an And
 
 The unit and HTTP tests cover odometer baselines, nullable startup samples, epoch rebasing and gap markers, server-time staleness, interpolation and monotonic holds, calibration, GPS rollback across epoch changes, authentication retry latching, SSE and polling fallback, saved places, stale search selections, actual Ukrainian address parsing, query encoding/caching, route geometry, persistence, independent GPS display/staleness, appearance persistence, and gesture/follow camera state. The included Kyiv route and address fixture were obtained from OSRM and Photon on 10 September 2026.
 
-Android 15 emulator checks cover an in-place upgrade with the old route pack, offline day/night rendering, independent and overlapping GPS markers, stale GPS, camera fitting, Services safe areas, and portrait/landscape Preview driving. See [driving UI notes](docs/DRIVING_UI.md).
+Android 15 emulator checks cover an in-place upgrade with the old route pack, offline day/night rendering, independent and overlapping GPS markers, stale GPS, camera fitting, Advanced tools safe areas, and portrait/landscape simulation driving. See [driving UI notes](docs/DRIVING_UI.md).
 
 On your phone/tablet, verify: address selection and GPS start; saved Home/Work after restart; Start route with the real odometer; stationary values; network loss/recovery; GPS Sync and Undo after movement; both offline packs; portrait/landscape layouts; independent markers and recenter; and a cold launch without internet after downloads report ready. Real GPS hardware, Pi connectivity, and driving behavior still need validation on your phone/tablet and BMW.
 
-This version has English controls and maneuver text, with native road names. Voice guidance, background navigation, fully offline route calculation, offline address indexing, traffic information, and automatic deviation detection are not implemented.
+This version has English controls and maneuver text, with native road names. Turn-by-turn spoken guidance, background navigation, fully offline route calculation, offline address indexing, traffic information, and automatic deviation detection are not implemented.
 
 [OpenStreetMap attribution](https://www.openstreetmap.org/copyright) · [Photon API and usage](https://github.com/komoot/photon) · [OSRM service policy](https://github.com/Project-OSRM/osrm-backend/wiki/Api-usage-policy) · [MapLibre offline regions](https://maplibre.org/maplibre-native/android/api/-map-libre%20-native%20-android/org.maplibre.android.offline/-offline-region/index.html)
+
+## Experimental GPS-free road prediction
+
+**Menu → Experimental navigation → Predict roads and recalculate offline** enables the first experimental navigation module. It defaults to off and has not been validated while driving. Mount the phone securely; moving the phone independently of the vehicle corrupts turn measurements. Set a known starting position and route direction. The module uses gravity-projected gyroscope rotation and calibrated **confirmed odometer** increments; it does not use GPS, compass heading, or speed interpolation as prediction input.
+
+Import a local road graph using **Import offline road graph (JSON)** before enabling it. Display map tiles are not a routing graph. Version 1 files contain `[longitude, latitude]` nodes and directed `[fromNodeIndex, toNodeIndex]` edges:
+
+```json
+{"version":1,"nodes":[[30.0,50.0],[30.0,50.001],[30.002,50.001]],"edges":[[0,1],[1,0],[1,2],[2,1]]}
+```
+
+Each edge is a straight drivable segment; split curved roads into segments. Junctions connect only through shared node indices. Crossings on bridges must use separate nodes. Exporters must omit prohibited directions and encode legal connections in topology. This initial format has no separate turn-restriction, lane, vehicle-access, or roundabout model, so graphs with such restrictions need a richer format before real navigation use. Import is limited to 10 MB, 50,000 nodes, and 100,000 directed edges. The last imported graph is stored locally and remains available offline. No automatic map-provider road-graph download is implemented.
+
+A bounded candidate search starts within 50 m and 60° of the known route position/direction. Odometer distance advances candidates through connected roads, and relative gyro heading ranks possible turns. A matching measured turn can snap a moving candidate to a junction up to 25 m ahead to accommodate small odometer errors. Close alternatives retain low confidence. A sufficiently distinct candidate permits local shortest-distance recalculation to the original destination, at most once every five seconds, with geometry-derived left/right/turn-around instructions. The destination must be within 100 m of a reachable graph node. These confidence scores are heuristic, not calibrated probabilities.
+
+When prediction is enabled, uncertain estimates suppress maneuver guidance. Missing roads, unavailable motion, odometer discontinuities, or a jump over 500 m require alignment. Backgrounding stops sensors; resuming a running session requires **Advanced tools → Align** (or explicit GPS Sync). The predictor is deliberately not persisted across restarts. Odometer totals survive recalculation; the new route starts at the predicted point. Turn recognition, sensor bias, phone movement, coarse odometer timing, and similar parallel roads remain live-testing limitations. Disable the option to return to selected-route odometer tracking.

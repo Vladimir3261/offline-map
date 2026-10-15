@@ -50,12 +50,13 @@ class DrivingMap(private val context: Context, private val map: MapLibreMap, pri
 
     private fun setup(style: Style) {
         fun source(id: String) = style.addSource(GeoJsonSource(id, empty()))
-        listOf("route", "route-travelled", "route-gaps", "gps-accuracy", "gps-connector", "gps-position", "position", "destination").forEach(::source)
+        listOf("route", "route-start", "route-travelled", "route-gaps", "gps-accuracy", "gps-connector", "gps-position", "position", "destination").forEach(::source)
         style.addLayer(LineLayer("route-outline", "route").withProperties(lineColor("#233A70"), lineWidth(12f), lineCap("round"), lineJoin("round")))
         style.addLayer(LineLayer("route-active", "route").withProperties(lineColor(if (night) "#6A8EFF" else "#4D78FF"), lineWidth(8f), lineCap("round"), lineJoin("round")))
         style.addLayer(LineLayer("route-travelled-line", "route-travelled").withProperties(lineColor("#7989A8"), lineWidth(8f), lineCap("round"), lineJoin("round")))
         style.addLayer(CircleLayer("route-gap-dots", "route-gaps").withProperties(circleRadius(6f), circleColor("#F04E3E"), circleStrokeColor(Color.WHITE), circleStrokeWidth(2f)))
         style.addLayer(CircleLayer("destination-dot", "destination").withProperties(circleRadius(7f), circleColor(Color.WHITE), circleStrokeColor("#233A70"), circleStrokeWidth(3f)))
+        style.addLayer(CircleLayer("start-dot", "route-start").withProperties(circleRadius(6f), circleColor("#4D78FF"), circleStrokeColor(Color.WHITE), circleStrokeWidth(3f)))
         style.addLayer(FillLayer("gps-accuracy-fill", "gps-accuracy").withProperties(fillColor("#4285F4"), fillOpacity(.12f)))
         style.addLayer(LineLayer("gps-accuracy-outline", "gps-accuracy").withProperties(lineColor("#4285F4"), lineWidth(1f), lineOpacity(.45f)))
         style.addLayer(LineLayer("gps-comparison-line", "gps-connector").withProperties(lineColor(if (night) "#B2C3E5" else "#61759A"), lineWidth(1.5f), lineOpacity(.6f), lineDasharray(arrayOf(2f, 3f))))
@@ -72,7 +73,15 @@ class DrivingMap(private val context: Context, private val map: MapLibreMap, pri
             iconPitchAlignment("viewport"), iconAllowOverlap(true), iconIgnorePlacement(true)))
     }
 
-    fun render(currentRoute: Route, progress: Double, position: RoutePosition, debug: PositionDebug, gaps: List<RouteGap>, nowMs: Long) {
+    fun renderExplore(gps: GpsFix?) {
+        route = null; comparison = null; renderedProgress = Double.NaN; overlap = null
+        listOf("route", "route-start", "route-travelled", "route-gaps", "position", "destination", "gps-connector").forEach { put(it, null) }
+        put("gps-position", gps?.coordinate?.let(::point))
+        put("gps-accuracy", gps?.let(::accuracyCircle)); accuracyFix = gps
+        map.style?.getLayerAs<CircleLayer>("gps-ring")?.setProperties(circleRadius(14f))
+    }
+
+    fun render(currentRoute: Route, progress: Double, position: RoutePosition, debug: PositionDebug, gaps: List<RouteGap>, nowMs: Long, navigating: Boolean = true) {
         val style = map.style ?: return
         if (style.getSource("position") == null) return
         if (route !== currentRoute) {
@@ -86,13 +95,17 @@ class DrivingMap(private val context: Context, private val map: MapLibreMap, pri
             put("route-travelled", if (progress > 0 && passed.size >= 2) LineString.fromLngLats(passed) else null)
         }
         val feature = Feature.fromGeometry(point(position.coordinate)).apply { addNumberProperty("bearing", position.bearing) }
-        style.getSourceAs<GeoJsonSource>("position")?.setGeoJson(feature)
+        if (navigating) style.getSourceAs<GeoJsonSource>("position")?.setGeoJson(feature) else put("position", null)
+        put("route-start", if (navigating) null else point(currentRoute.points.first()))
         style.getSourceAs<GeoJsonSource>("route-gaps")?.setGeoJson(FeatureCollection.fromFeatures(gaps.map { Feature.fromGeometry(point(currentRoute.position(it.progressMeters).coordinate)) }))
-        comparison = debug
+        comparison = if (navigating) debug else null
         put("gps-position", debug.gps?.coordinate?.let(::point))
         if (debug.gps != accuracyFix) { accuracyFix = debug.gps; put("gps-accuracy", debug.gps?.let(::accuracyCircle)) }
-        updateOverlap(force = true)
-        if (follow.shouldMove(position, nowMs)) {
+        if (navigating) updateOverlap(force = true) else {
+            put("gps-connector", null)
+            style.getLayerAs<CircleLayer>("gps-ring")?.setProperties(circleRadius(14f))
+        }
+        if (navigating && follow.shouldMove(position, nowMs)) {
             map.easeCamera(CameraUpdateFactory.newCameraPosition(CameraPosition.Builder()
                 .target(LatLng(position.coordinate.latitude, position.coordinate.longitude)).zoom(16.6)
                 .tilt(48.0).bearing(position.bearing).build()), 600, false)
