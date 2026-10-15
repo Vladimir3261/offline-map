@@ -20,7 +20,7 @@ class LocationToolsTest {
         assertNull(proposal)
         val id = result.getJSONArray("places").getJSONObject(0).getString("id")
         val response = tools.execute("propose_location", args(id))
-        assertEquals("preview_only", response.getString("status"))
+        assertEquals("estimate_ready", response.getString("status"))
         assertEquals(nearby, proposal!!.place)
         assertEquals(42.0, proposal!!.travelMeters, 0.0)
     }
@@ -33,10 +33,32 @@ class LocationToolsTest {
         assertNull(proposal)
     }
 
-    @Test fun passingAStoreDoesNotEstablishCurrentPosition() {
+    @Test fun pastSightingProducesBestEstimateWithoutDemandingCurrentLandmark() {
         tools.execute("search_places", JSONObject().put("query", "Shop"))
-        assertThrows(Exception::class.java) { tools.execute("propose_location", args("p1").put("observation", "just_passed")) }
-        assertNull(proposal)
+        tools.execute("propose_location", args("p1").put("seconds_ago", 5))
+        assertNotNull(proposal)
+        assertTrue(proposal!!.estimate!!.uncertain)
+        assertTrue(proposal!!.confidence <= 55)
+    }
+
+    @Test fun eachReportHasBoundedSearchAndCannotReuseOldEvidence() {
+        tools.execute("search_places", JSONObject().put("query", "Shop"))
+        tools.execute("search_places", JSONObject().put("query", "Shop again"))
+        assertThrows(Exception::class.java) { tools.execute("search_places", JSONObject().put("query", "More")) }
+        tools.beginReport(LocationObservation(center, now, 42.0, null, null, null, null))
+        assertThrows(Exception::class.java) { tools.execute("propose_location", args("p1")) }
+        tools.execute("search_places", JSONObject().put("query", "New report"))
+    }
+
+    @Test fun genericSupermarketOnRightUsesCategorySearchAndExposesSide() {
+        val local = LocationTools({ JSONObject() }, { center }, { _, _ -> emptyList() }, { now }, { 0.0 }, { proposal = it },
+            { category, _, _ -> assertEquals("supermarket", category); listOf(Place("Market", Coordinate(50.45, 30.521))) })
+        local.beginReport(LocationObservation(center, now, 0.0, 0.0, null, null, null))
+        val result = local.execute("nearby_places", JSONObject().put("category", "supermarket"))
+        val place = result.getJSONArray("places").getJSONObject(0)
+        assertEquals("right", place.getString("side"))
+        local.execute("propose_location", args(place.getString("id")))
+        assertNotNull(proposal)
     }
 
     @Test fun contextStaysFreshAndArgumentsAreBounded() {
@@ -45,6 +67,6 @@ class LocationToolsTest {
         assertThrows(Exception::class.java) { tools.execute("search_places", JSONObject().put("query", "x")) }
         assertThrows(Exception::class.java) { tools.execute("arbitrary_network_request", JSONObject()) }
     }
-    private fun args(id: String) = JSONObject().put("place_id", id).put("reason", "User confirms being alongside this shop now")
-        .put("observation", "at_place_now")
+    private fun args(id: String) = JSONObject().put("place_id", id).put("reason", "Best match from the reported clue")
+        .put("confidence", 75)
 }

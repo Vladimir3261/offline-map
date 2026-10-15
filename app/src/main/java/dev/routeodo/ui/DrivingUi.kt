@@ -7,6 +7,8 @@ import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
 import android.view.Gravity
 import android.view.View
+import android.view.MotionEvent
+import dev.routeodo.voice.VoicePresentation
 import android.widget.*
 import dev.routeodo.core.GpsDisplayState
 import dev.routeodo.data.SavedPlace
@@ -30,6 +32,8 @@ data class DrivingState(
 class DrivingUi(context: Context, mapView: MapView, menu: () -> Unit, search: () -> Unit,
     edit: () -> Unit, private val primary: () -> Unit, recenter: () -> Unit, compare: () -> Unit,
     private val mapInsets: (Int, Int, Int, Int) -> Unit,
+    private val voicePress: () -> Unit, private val voiceRelease: (Boolean) -> Unit,
+    voiceSettings: () -> Unit, voiceStop: () -> Unit, voiceReview: () -> Unit,
 ) : FrameLayout(context) {
     private var palette = DrivingPalette(false)
     private val top = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
@@ -65,6 +69,39 @@ class DrivingUi(context: Context, mapView: MapView, menu: () -> Unit, search: ()
     private val shortcutScroll = HorizontalScrollView(context).apply { isHorizontalScrollBarEnabled = false; addView(shortcuts) }
     private val followButton = button("➤", "Recenter", recenter).apply { textSize = 26f }
     private val notice = TextView(context).font(12f, palette.warning, true).apply { setPadding(dp(12), dp(10), dp(12), dp(10)); maxLines = 2 }
+    private val voicePanel = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), dp(4), dp(12), dp(10)) }
+    private val voiceRow = LinearLayout(context).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(0, dp(10), 0, 0) }
+    private var touchPress = false
+    private var voiceRecording = false
+    private val voiceButton = button("●  Удерживайте и говорите", "Удерживайте, чтобы сообщить ориентир", {}).apply {
+        textSize = 16f
+        setOnTouchListener { view, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> { touchPress = true; parent.requestDisallowInterceptTouchEvent(true); voicePress(); true }
+                MotionEvent.ACTION_MOVE -> {
+                    if (touchPress && (event.x < -dp(24) || event.x > width + dp(24) || event.y < -dp(24) || event.y > height + dp(24))) {
+                        touchPress = false; voiceRelease(true)
+                    }; true
+                }
+                MotionEvent.ACTION_UP -> {
+                    if (touchPress) { voiceRelease(false); view.performClick() }; touchPress = false; true
+                }
+                MotionEvent.ACTION_CANCEL -> { if (touchPress) voiceRelease(true); touchPress = false; true }
+                else -> true
+            }
+        }
+        // TalkBack / keyboard activation toggles capture without requiring a sustained press.
+        setOnClickListener { if (!touchPress) { if (voiceRecording) voiceRelease(false) else voicePress() } }
+    }
+    private val voiceConfig = button("⚙", "Настройки голосового определения места", voiceSettings)
+    private val voiceClose = button("×", "Остановить голосовое определение места", voiceStop)
+    private val voiceMessage = TextView(context).font(12f, palette.secondary).apply {
+        text = "Удерживайте, чтобы сказать, что видите"; maxLines = 2; setPadding(0, dp(6), 0, 0)
+    }
+    private val voiceResult = TextView(context).font(15f, palette.accent, true).apply {
+        visibility = GONE; maxLines = 2; minHeight = dp(48); gravity = Gravity.CENTER_VERTICAL
+        isClickable = true; isFocusable = true; setOnClickListener { voiceReview() }
+    }
     private var safeLeft = 0; private var safeTop = 0; private var safeRight = 0; private var safeBottom = 0
     private var lastInsets = emptyList<Int>()
     private var phase = JourneyPhase.EXPLORE
@@ -90,7 +127,12 @@ class DrivingUi(context: Context, mapView: MapView, menu: () -> Unit, search: ()
         navRow.addView(navInfo, LinearLayout.LayoutParams(0, -2, 1f))
         navRow.addView(stop, LinearLayout.LayoutParams(dp(78), dp(54)))
         bottom.addView(navRow); bottom.addView(comparison)
+        voiceRow.addView(voiceButton, LinearLayout.LayoutParams(0, dp(60), 1f))
+        voiceRow.addView(voiceConfig, LinearLayout.LayoutParams(dp(48), dp(56)).apply { leftMargin = dp(4) })
+        voiceRow.addView(voiceClose, LinearLayout.LayoutParams(dp(48), dp(56)))
+        voicePanel.addView(voiceRow); voicePanel.addView(voiceMessage); voicePanel.addView(voiceResult)
         addView(bottom, LayoutParams(-1, -2, Gravity.BOTTOM or Gravity.START))
+        addView(voicePanel, LayoutParams(-1, -2, Gravity.BOTTOM or Gravity.END))
         addView(notice, LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.START))
         addView(followButton, LayoutParams(dp(56), dp(56), Gravity.BOTTOM or Gravity.END))
         setOnApplyWindowInsetsListener { _, insets ->
@@ -113,12 +155,28 @@ class DrivingUi(context: Context, mapView: MapView, menu: () -> Unit, search: ()
         palette = value
         searchBar.background = rounded(value.panel, dp(24).toFloat()); maneuver.background = rounded(value.panel, dp(22).toFloat())
         bottom.background = rounded(value.panel, dp(24).toFloat())
+        voicePanel.background = rounded(value.panel, dp(24).toFloat())
         for (v in listOf(searchText, distance, instruction, title, summary, remaining, speed)) v.setTextColor(value.text)
         for (v in listOf(subtitle, arrival, speedUnit, comparison)) v.setTextColor(value.secondary)
-        for (v in listOf(searchMenu, navMenu, editButton, followButton)) { v.background = rounded(value.soft, dp(20).toFloat()); v.setTextColor(value.accent) }
+        for (v in listOf(searchMenu, navMenu, editButton, followButton, voiceConfig, voiceClose)) { v.background = rounded(value.soft, dp(20).toFloat()); v.setTextColor(value.accent) }
         primaryButton.background = rounded(value.accent, dp(18).toFloat()); primaryButton.setTextColor(if (value.night) Color.parseColor("#14213C") else Color.WHITE)
+        voiceButton.background = rounded(value.accent, dp(18).toFloat()); voiceButton.setTextColor(if (value.night) Color.parseColor("#14213C") else Color.WHITE)
+        voiceMessage.setTextColor(value.secondary); voiceResult.setTextColor(value.accent)
         stop.background = rounded(if (value.night) Color.parseColor("#4D3030") else Color.parseColor("#FCECEA"), dp(18).toFloat()); stop.setTextColor(value.warning)
         turn.background = rounded(Color.parseColor(if (value.night) "#3559B1" else "#285EE8"), dp(16).toFloat())
+    }
+
+    fun voice(value: VoicePresentation) {
+        voiceRecording = value.recording
+        voiceButton.updateText(if (value.recording) "●  Говорите…" else "●  Удерживайте и говорите")
+        voiceButton.contentDescription = if (value.recording) "Запись. Отпустите для отправки" else "Удерживайте, чтобы сообщить ориентир"
+        voiceButton.isActivated = value.recording
+        voiceMessage.updateText(value.message)
+        val result = value.proposal
+        voiceResult.visibility = if (result == null) GONE else VISIBLE
+        if (result != null) voiceResult.updateText("${result.confidence}% · ${result.place.label}  ›")
+        voiceResult.contentDescription = result?.let { "Лучшее совпадение: ${it.place.label}. Уверенность ${it.confidence} процентов. Проверить оценку" }
+        arrange()
     }
 
     fun render(state: DrivingState, journey: JourneyUi) {
@@ -181,10 +239,14 @@ class DrivingUi(context: Context, mapView: MapView, menu: () -> Unit, search: ()
         place(top, card, -2, Gravity.TOP or Gravity.START, safeLeft + dp(14), safeTop + dp(12), 0, 0)
         val bottomWidth = if (wide) minOf(dp(500), card) else card
         place(bottom, bottomWidth, -2, Gravity.BOTTOM or Gravity.START, safeLeft + dp(14), 0, 0, safeBottom + dp(12))
-        place(followButton, dp(56), dp(56), Gravity.BOTTOM or Gravity.END, 0, 0, safeRight + dp(14), safeBottom + if (wide) dp(16) else bottom.height + dp(26))
-        place(notice, if (wide) card else maxOf(dp(100), card - dp(70)), -2, Gravity.BOTTOM or Gravity.START, safeLeft + dp(14), 0, 0, safeBottom + bottom.height + dp(26))
-        val padding = if (wide) listOf(safeLeft + card + dp(30), safeTop + dp(24), safeRight + dp(24), safeBottom + dp(30))
-            else listOf(safeLeft + dp(24), safeTop + top.height + dp(32), safeRight + dp(24), safeBottom + bottom.height + dp(38))
+        val voiceWidth = if (wide) minOf(dp(390), available - card - dp(14)) else card
+        place(voicePanel, voiceWidth, -2, Gravity.BOTTOM or Gravity.END, 0, 0, safeRight + dp(14),
+            safeBottom + if (wide) dp(12) else bottom.height + dp(20))
+        place(followButton, dp(56), dp(56), Gravity.BOTTOM or Gravity.END, 0, 0, safeRight + dp(14),
+            safeBottom + voicePanel.height + if (wide) dp(24) else bottom.height + dp(32))
+        place(notice, if (wide) card else maxOf(dp(100), card - dp(70)), -2, Gravity.BOTTOM or Gravity.START, safeLeft + dp(14), 0, 0, safeBottom + if (wide) bottom.height + dp(26) else bottom.height + voicePanel.height + dp(32))
+        val padding = if (wide) listOf(safeLeft + card + dp(30), safeTop + dp(24), safeRight + dp(24), safeBottom + voicePanel.height + dp(30))
+            else listOf(safeLeft + dp(24), safeTop + top.height + dp(32), safeRight + dp(24), safeBottom + bottom.height + voicePanel.height + dp(46))
         if (padding != lastInsets) { lastInsets = padding; mapInsets(padding[0], padding[1], padding[2], padding[3]) }
     }
 }

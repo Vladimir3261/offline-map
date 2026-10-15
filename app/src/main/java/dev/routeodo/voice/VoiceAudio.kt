@@ -20,8 +20,13 @@ class VoiceAudio(private val manager: AudioManager, private val input: (ByteArra
     private var itemStart = 0L
     private var written = 0L
     private var capture: Thread? = null
+    private val capturing = AtomicBoolean(false)
     private var playback: Thread? = null
-    private var previousMode: Int? = null
+    companion object {
+        private val modeLock = Any()
+        private var modeOwner: VoiceAudio? = null
+        private var originalMode: Int? = null
+    }
     private val attributes = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build()
     private val focus = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
@@ -32,8 +37,11 @@ class VoiceAudio(private val manager: AudioManager, private val input: (ByteArra
     @SuppressLint("MissingPermission")
     fun start() {
         check(manager.requestAudioFocus(focus) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) { "Audio is in use" }
-        previousMode = manager.mode
-        manager.mode = AudioManager.MODE_IN_COMMUNICATION
+        synchronized(modeLock) {
+            if (modeOwner == null) originalMode = manager.mode
+            modeOwner = this
+            manager.mode = AudioManager.MODE_IN_COMMUNICATION
+        }
         val format = AudioFormat.Builder().setSampleRate(24000).setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
             .setEncoding(AudioFormat.ENCODING_PCM_16BIT).build()
         record = AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION, 24000, AudioFormat.CHANNEL_IN_MONO,
@@ -43,17 +51,7 @@ class VoiceAudio(private val manager: AudioManager, private val input: (ByteArra
             .setBufferSizeInBytes(maxOf(9600, AudioTrack.getMinBufferSize(24000, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)))
             .setTransferMode(AudioTrack.MODE_STREAM).build()
         if (AcousticEchoCanceler.isAvailable()) echo = AcousticEchoCanceler.create(record!!.audioSessionId)?.apply { enabled = true }
-        record!!.startRecording(); track!!.play(); running.set(true)
-        capture = Thread({
-            try {
-                val bytes = ByteArray(2400)
-                while (running.get()) {
-                    val n = record!!.read(bytes, 0, bytes.size)
-                    check(n > 0)
-                    if (running.get()) input(bytes.copyOf(n))
-                }
-            } catch (_: Exception) { if (running.get()) failed() }
-        }, "voice-mic").apply { start() }
+        track!!.play(); running.set(true)
         playback = Thread({
             try {
                 while (running.get()) {
@@ -77,6 +75,30 @@ class VoiceAudio(private val manager: AudioManager, private val input: (ByteArra
         }, "voice-speaker").apply { start() }
     }
 
+    fun beginCapture() {
+        check(running.get())
+        if (!capturing.compareAndSet(false, true)) return
+        record!!.startRecording()
+        capture = Thread({
+            try {
+                val bytes = ByteArray(2400)
+                while (running.get() && capturing.get()) {
+                    val n = record!!.read(bytes, 0, bytes.size)
+                    if (!capturing.get() || !running.get()) break
+                    check(n > 0)
+                    input(bytes.copyOf(n))
+                }
+            } catch (_: Exception) { if (running.get() && capturing.get()) failed() }
+        }, "voice-mic").apply { start() }
+    }
+
+    fun endCapture() {
+        capturing.set(false)
+        runCatching { record?.stop() }
+        if (capture !== Thread.currentThread()) capture?.join(500)
+        capture = null
+    }
+
     fun enqueue(id: String, pcm: ByteArray) {
         val accepted = synchronized(lock) {
             running.get() && pcm.size <= 240000 && pcm.size % 2 == 0 && queue.offer(Chunk(id, pcm, epoch))
@@ -94,12 +116,15 @@ class VoiceAudio(private val manager: AudioManager, private val input: (ByteArra
 
     override fun close() {
         running.set(false)
-        runCatching { record?.stop() }
+        endCapture()
         playback?.interrupt()
-        capture?.join(500); playback?.join(500)
+        playback?.join(500)
         synchronized(lock) {
             record?.release(); record = null; track?.release(); track = null; echo?.release(); echo = null; queue.clear()
-            previousMode?.let { manager.mode = it }; previousMode = null; manager.abandonAudioFocusRequest(focus)
+            synchronized(modeLock) {
+                if (modeOwner === this) { originalMode?.let { manager.mode = it }; originalMode = null; modeOwner = null }
+            }
+            manager.abandonAudioFocusRequest(focus)
         }
     }
 }

@@ -21,13 +21,13 @@ class Network(private val clockMillis: () -> Long = { System.nanoTime() / 1_000_
     private var lastSearchAt: Long? = null
 
     @Synchronized
-    fun search(baseUrl: String, query: String, focus: Coordinate): List<Place> {
+    fun search(baseUrl: String, query: String, focus: Coordinate, timeoutMillis: Long? = null): List<Place> {
         val url = searchUrl(baseUrl, query, focus)
         val now = clockMillis()
         cached(url)?.let { return it }
         require(lastSearchAt?.let { now - it >= 1_100 } != false) { "Please wait a moment before searching again" }
         lastSearchAt = now
-        val results = PlaceCodec.photon(get(url, "", 512 * 1024))
+        val results = PlaceCodec.photon(get(url, "", 512 * 1024, timeoutMillis))
         remember(url, results)
         return results
     }
@@ -84,8 +84,10 @@ class Network(private val clockMillis: () -> Long = { System.nanoTime() / 1_000_
         return get(url.toString(), "", 20 * 1024 * 1024)
     }
 
-    private fun get(url: String, token: String, maxBytes: Long): String {
-        return client.newCall(request(url, token)).execute().use { read(it, maxBytes) }
+    private fun get(url: String, token: String, maxBytes: Long, timeoutMillis: Long? = null): String {
+        val call = client.newCall(request(url, token))
+        timeoutMillis?.let { require(it in 100..15000); call.timeout().timeout(it, TimeUnit.MILLISECONDS) }
+        return call.execute().use { read(it, maxBytes) }
     }
 
     private fun request(url: String, token: String): Request {

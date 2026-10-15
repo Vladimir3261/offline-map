@@ -30,13 +30,13 @@ Search starts after two characters, waits 400 ms after typing, and starts reques
 
 Saved names, addresses, and coordinates persist locally across app restarts and updates. Selecting a saved place requires no geocoding or internet, but calculating a new route still needs internet. Search errors leave saved-place choices available. There is no account, telemetry, trip history, or cloud synchronization.
 
-## Find your position by voice (prototype)
+## Find your position by voice
 
-Choose **Menu → Find me by voice**, allow microphone access, enter your own OpenAI API key, and tap **Start voice chat**. Describe nearby signs, shops, streets or junctions in your language. The agent uses the approximate route/odometer position (or fresh GPS/map center when browsing), requests nearby OpenStreetMap/Photon matches, and asks follow-up questions. This requires internet and a billed API account. The model field is configurable for account availability.
+The map always shows **Удерживайте и говорите**. Hold it, describe what you see once, then release. The agent gives its best estimate and a confidence score in **Russian by default**. It uses the approximate position, heading, route, movement and nearby OSM places; “a supermarket on the right” is enough to attempt a match. Named places use Photon; category searches use Overpass. It must give a result before asking at most one optional confirmation. It does not require a new landmark alongside you or a preliminary interview.
 
-A proposed landmark appears in the dialog. **Review proposed location** ends voice capture and opens an explicit confirmation. During navigation this uses route alignment preview and Undo; while browsing it can supply the route's starting point. A past sighting or street name alone is insufficient for a point correction: this prototype asks for a landmark alongside you now. It does not infer a new road after leaving the selected route.
+The purple estimated position includes movement since you pressed Talk, and advances along the selected route as you drive. Tap the confidence/result row to review and optionally apply a suitable route correction with Undo, or use the area as a route starting point. Weak/off-route matches remain approximate. Confidence is a heuristic match score, not a calibrated GPS accuracy.
 
-The key is encrypted in Android Keystore-backed storage, separately from the car token. **Forget key** removes it. Voice, conversation and location context go to OpenAI; named-place queries go to the configured Photon service. Audio is not saved locally. Closing, ending, or backgrounding stops the session and microphone. Photon requires no key for light testing. Provider-specific paid search adapters and a production backend for short-lived voice credentials are future work. See [voice integration details and verification](docs/AI_LOCATION.md).
+Configure your OpenAI API key once using the on-map gear or **Menu → Voice settings**. It is encrypted separately from the car token. Internet and a billed API account are required. Voice/location context go to OpenAI; searches and their approximate area go to Photon or Overpass. No audio is saved locally. The microphone records only while you hold the button; release submits, sliding away cancels, and backgrounding stops the session. Keyboard/TalkBack activation toggles recording. [Integration details and verification](docs/AI_LOCATION.md).
 
 ## Online maps and offline downloads
 

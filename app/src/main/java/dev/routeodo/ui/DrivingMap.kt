@@ -50,7 +50,7 @@ class DrivingMap(private val context: Context, private val map: MapLibreMap, pri
 
     private fun setup(style: Style) {
         fun source(id: String) = style.addSource(GeoJsonSource(id, empty()))
-        listOf("route", "route-start", "route-travelled", "route-gaps", "gps-accuracy", "gps-connector", "gps-position", "position", "destination").forEach(::source)
+        listOf("route", "route-start", "route-travelled", "route-gaps", "gps-accuracy", "gps-connector", "gps-position", "position", "destination", "voice-estimate").forEach(::source)
         style.addLayer(LineLayer("route-outline", "route").withProperties(lineColor("#233A70"), lineWidth(12f), lineCap("round"), lineJoin("round")))
         style.addLayer(LineLayer("route-active", "route").withProperties(lineColor(if (night) "#6A8EFF" else "#4D78FF"), lineWidth(8f), lineCap("round"), lineJoin("round")))
         style.addLayer(LineLayer("route-travelled-line", "route-travelled").withProperties(lineColor("#7989A8"), lineWidth(8f), lineCap("round"), lineJoin("round")))
@@ -62,6 +62,8 @@ class DrivingMap(private val context: Context, private val map: MapLibreMap, pri
         style.addLayer(LineLayer("gps-comparison-line", "gps-connector").withProperties(lineColor(if (night) "#B2C3E5" else "#61759A"), lineWidth(1.5f), lineOpacity(.6f), lineDasharray(arrayOf(2f, 3f))))
         style.addLayer(CircleLayer("gps-ring", "gps-position").withProperties(circleRadius(14f), circleColor("#4285F4"), circleOpacity(.08f), circleStrokeColor("#4285F4"), circleStrokeWidth(2.5f)))
         style.addLayer(CircleLayer("gps-dot", "gps-position").withProperties(circleRadius(7f), circleColor("#4285F4"), circleStrokeColor(Color.WHITE), circleStrokeWidth(2.5f)))
+        style.addLayer(CircleLayer("voice-estimate-dot", "voice-estimate").withProperties(circleRadius(11f),
+            circleColor("#9654D8"), circleStrokeColor(Color.WHITE), circleStrokeWidth(3f)))
         val drawable = context.getDrawable(R.drawable.ic_vehicle)!!
         val size = context.dp(52)
         val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
@@ -72,6 +74,8 @@ class DrivingMap(private val context: Context, private val map: MapLibreMap, pri
             iconImage("routeodo-chevron"), iconRotate(get("bearing")), iconRotationAlignment("map"),
             iconPitchAlignment("viewport"), iconAllowOverlap(true), iconIgnorePlacement(true)))
     }
+
+    fun voiceEstimate(coordinate: Coordinate?) { put("voice-estimate", coordinate?.let(::point)) }
 
     fun renderExplore(gps: GpsFix?) {
         route = null; comparison = null; renderedProgress = Double.NaN; overlap = null
