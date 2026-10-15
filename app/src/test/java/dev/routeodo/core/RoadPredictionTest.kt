@@ -6,6 +6,12 @@ import org.junit.Test
 class RoadPredictionTest {
     private val nodes = listOf(Coordinate(50.0, 30.0), Coordinate(50.001, 30.0), Coordinate(50.002, 30.0), Coordinate(50.001, 30.002), Coordinate(50.001, 29.998))
     private fun graph() = RoadGraph(nodes, listOf(RoadEdge(0,1), RoadEdge(1,2), RoadEdge(1,3), RoadEdge(1,4), RoadEdge(3,1), RoadEdge(1,0)))
+    @Test fun destinationBetweenNodesDoesNotRequireNearbyVertex() {
+        val graph = RoadGraph(listOf(Coordinate(50.0,30.0),Coordinate(50.01,30.0)),listOf(RoadEdge(0,1)))
+        val route = graph.route(RoadHypothesis(RoadEdge(0,1),10.0,0.0),Coordinate(50.005,30.0))!!
+        assertTrue(Route.distance(route.points.last(),Coordinate(50.005,30.0)) < 1)
+        assertTrue(route.lengthMeters < 600)
+    }
     @Test fun rightTurnFollowsConnectedRoadAndReroutesOffline() {
         val graph = graph()
         val predictor = RoadPredictor(graph, nodes[0], 0.0)

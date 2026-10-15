@@ -14,6 +14,8 @@ class RoadDownloader(
     private val client: OkHttpClient = OkHttpClient.Builder().connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(40, TimeUnit.SECONDS).callTimeout(60, TimeUnit.SECONDS)
         .followRedirects(false).followSslRedirects(false).build(),
+    private val fallbackEndpoint: String? = if (endpoint == "https://overpass-api.de/api/interpreter")
+        "https://overpass.private.coffee/api/interpreter" else null,
 ) {
     @Volatile private var cancelled = false
     @Volatile private var call: Call? = null
@@ -21,22 +23,7 @@ class RoadDownloader(
     fun fetch(route: Route): RoadGraph {
         val bounds = RoadCoverage.around(route)
         if (cancelled) throw IOException("Download cancelled")
-        val query = query(bounds)
-        val request = Request.Builder().url(endpoint).header("User-Agent", "RouteOdo/0.5 Android")
-            .post(FormBody.Builder().add("data", query).build()).build()
-        val requestCall = client.newCall(request)
-        call = requestCall
-        if (cancelled) requestCall.cancel()
-        val raw = requestCall.execute().use { response ->
-            require(response.isSuccessful) { if (response.code == 429 || response.code == 504)
-                "Road service is busy. Please retry later." else "Road download failed (HTTP ${response.code})." }
-            val body = response.body ?: error("Road service returned an empty response")
-            val limit = 20L * 1024 * 1024
-            require(body.contentLength() <= limit) { "Road area is too large. Select a shorter route." }
-            val source = body.source()
-            require(!source.request(limit + 1)) { "Road area is too large. Select a shorter route." }
-            source.readUtf8()
-        }
+        val raw = download(bounds)
         if (cancelled) throw IOException("Download cancelled")
         val graph = OsmRoadGraph.read(raw, bounds, System.currentTimeMillis())
         val start = route.position(0.0)
@@ -46,6 +33,34 @@ class RoadDownloader(
         }
         if (cancelled) throw IOException("Download cancelled")
         return graph
+    }
+    private fun download(bounds: RoadCoverage): String {
+        var lastFailure: IOException? = null
+        for (service in listOfNotNull(endpoint, fallbackEndpoint).distinct()) {
+            if (cancelled) throw IOException("Download cancelled")
+            try {
+                val request = Request.Builder().url(service).header("User-Agent", "RouteOdo/0.5 Android")
+                    .post(FormBody.Builder().add("data", query(bounds)).build()).build()
+                val requestCall = client.newCall(request)
+                call = requestCall
+                if (cancelled) requestCall.cancel()
+                return requestCall.execute().use { response ->
+                    if (response.code == 429 || response.code in 500..599)
+                        throw IOException("Road service is busy (HTTP ${response.code}). Please retry later.")
+                    require(response.isSuccessful) { "Road download failed (HTTP ${response.code})." }
+                    val body = response.body ?: error("Road service returned an empty response")
+                    val limit = 20L * 1024 * 1024
+                    require(body.contentLength() <= limit) { "Road area is too large. Select a shorter route." }
+                    val source = body.source()
+                    require(!source.request(limit + 1)) { "Road area is too large. Select a shorter route." }
+                    source.readUtf8()
+                }
+            } catch (failure: IOException) {
+                if (cancelled) throw IOException("Download cancelled", failure)
+                lastFailure = failure
+            }
+        }
+        throw lastFailure ?: IOException("Road download failed")
     }
     companion object {
         fun query(bounds: RoadCoverage): String {

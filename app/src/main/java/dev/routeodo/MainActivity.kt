@@ -69,6 +69,9 @@ class MainActivity : Activity() {
     private var predictionEpoch: String? = null
     private var predictionStatus = "Experimental prediction off"
     private var lastPredictionRouteAt = 0L
+    private var predictionPathReady = false
+    private var predictionRecalculating = false
+    private var predictionRecalculationVersion = 0
     private var predictionConfident = false
     private var predictionFault = false
     private var palette = DrivingPalette(false)
@@ -320,7 +323,9 @@ class MainActivity : Activity() {
             transport, feedMessage, follow, saveError ?: if (predictionEnabled && live) predictionStatus else null), ::formatDistance)
         currentFeedText = presentation.feedText
         val journey = journey()
-        val screen = if (predictionEnabled && live && tracker.state.running && !predictionConfident)
+        val screen = if (predictionEnabled && live && tracker.state.running && predictionRecalculating && predictionConfident)
+            presentation.screen.copy(maneuverDistance = "—", instruction = "Recalculating offline…", source = "EXPERIMENTAL · ROADS")
+        else if (predictionEnabled && live && tracker.state.running && (!predictionConfident || !predictionPathReady))
             presentation.screen.copy(maneuverDistance = "—", instruction = "Position uncertain · align to resume guidance", warning = true)
         else if (predictionEnabled && live && tracker.state.running) presentation.screen.copy(source = "EXPERIMENTAL · ROADS")
         else presentation.screen
@@ -616,7 +621,7 @@ class MainActivity : Activity() {
     private fun resetPrediction(stop: Boolean = false) {
         motion.stop(); predictor = null; predictedPosition = null; predictionFault = false; predictionConfident = false
         predictionTravel = tracker.state.confirmedTravelMeters; predictionEpoch = tracker.state.baseEpoch
-        lastPredictionRouteAt = 0
+        lastPredictionRouteAt = 0; predictionPathReady = false; predictionRecalculating = false; predictionRecalculationVersion++
         predictionStatus = when {
             !predictionEnabled -> "Experimental prediction off"
             roadGraph == null -> "Prediction unavailable · download navigation roads"
@@ -660,6 +665,9 @@ class MainActivity : Activity() {
             predictionFault = true; predictionStatus = "Prediction lost road coverage · align position"; return
         }
         predictedPosition = estimate.position
+        val onGuidance = route.position(progressMeters)
+        if (Route.distance(estimate.position.coordinate, onGuidance.coordinate) > 50 ||
+            abs(signedAngle(estimate.position.bearing, onGuidance.bearing)) > 60) predictionPathReady = false
         predictionStatus = "Experimental road estimate · ${(estimate.confidence * 100).roundToInt()}% confidence"
         if (estimate.confidence < 0.8) {
             predictionStatus = "Experimental · ambiguous road; guidance held"
@@ -667,19 +675,41 @@ class MainActivity : Activity() {
         }
         predictionConfident = true
         val now = SystemClock.elapsedRealtime()
-        if (now - lastPredictionRouteAt < 5000) return
+        if (predictionRecalculating || now - lastPredictionRouteAt < 5000) return
         val best = engine.best ?: return
         val destination = routeDetails?.destination?.coordinate ?: route.points.last()
-        val recalculated = graph.route(best, destination)
-        if (recalculated == null) {
-            predictionConfident = false
-            predictionStatus = "Experimental · no offline path to destination"; return
+        val confirmedAtStart = tracker.state.confirmedTravelMeters
+        val session = tracker.state.navigationSessionId
+        val version = ++predictionRecalculationVersion
+        predictionRecalculating = true; lastPredictionRouteAt = now
+        workers.execute {
+            val result = runCatching { graph.route(best, destination) }
+            handler.post {
+                if (isDestroyed || version != predictionRecalculationVersion || predictor !== engine || roadGraph !== graph ||
+                    !active || !predictionEnabled || !tracker.state.running || tracker.state.navigationSessionId != session) return@post
+                predictionRecalculating = false
+                val recalculated = result.getOrNull()
+                if (recalculated == null) {
+                    predictionConfident = false; predictionPathReady = false
+                    predictionStatus = "Experimental · no offline path to destination"
+                } else if (predictionConfident && latest?.anchorFresh == true && SystemClock.elapsedRealtime() - latestAt < 2000) {
+                    val moved = (tracker.state.confirmedTravelMeters - confirmedAtStart) * tracker.state.scale
+                    val current = predictedPosition
+                    val expected = recalculated.position(moved)
+                    if (current != null && Route.distance(current.coordinate, expected.coordinate) < 50 &&
+                        abs(signedAngle(current.bearing, expected.bearing)) < 60) {
+                        route = recalculated; predictionPathReady = true
+                        // Preserve odometer travel received while the worker calculated the new path.
+                        val offset = (tracker.state.displayedTravelMeters - confirmedAtStart) * tracker.state.scale
+                        tracker.anchor(latest!!, offset.coerceAtLeast(0.0))
+                        clearUndo(); schedulePersist()
+                    } else {
+                        predictionConfident = false; predictionPathReady = false; predictionStatus = "Experimental · road changed; waiting for next recalculation"
+                    }
+                }
+                render()
+            }
         }
-        // Keep odometer/session anchors intact; only route alignment changes.
-        route = recalculated
-        val smoothingOffset = (tracker.state.displayedTravelMeters - tracker.state.confirmedTravelMeters) * tracker.state.scale
-        tracker.anchor(sample, smoothingOffset.coerceAtLeast(0.0))
-        clearUndo(); lastPredictionRouteAt = now; schedulePersist()
     }
 
     private fun vehicleScale(url: String = apiUrl): Double = getSharedPreferences("settings", MODE_PRIVATE)
@@ -785,6 +815,7 @@ class MainActivity : Activity() {
         follow = true; persist(); render()
         // Restart transport so no pre-start queued response can become the new baseline.
         connectCar(retryAuth = true)
+        if (predictionEnabled && !roadsCoverRoute()) downloadNavigationRoads()
     }
 
     private fun stopRoute() {
@@ -910,7 +941,7 @@ class MainActivity : Activity() {
         fields.addView(button("Show Kyiv coverage on map") {
             follow = false; map?.animateCamera(CameraUpdateFactory.newLatLngBounds(KYIV_BOUNDS, dp(30)))
         })
-        fields.addView(label("Downloads include map style, labels and tiles, with a 1 GB cap per pack. Download only the route for a smaller pack. Address search and new route calculation still need internet.", 12f, muted))
+        fields.addView(label("Map packs include style, labels and tiles, with a 1 GB cap per pack. Navigation roads are a separate small download for experimental offline recalculation. Address search and initial route planning need internet.", 12f, muted))
         val dialog = AlertDialog.Builder(this).setTitle("Online and offline maps").setView(ScrollView(this).apply { addView(fields) })
             .setPositiveButton("Done", null).setNeutralButton("Refresh online map") { _, _ -> refreshOnlineMap() }.create()
         mapsStatusUpdate = { routeStatus.text = offline.statusText; cityStatus.text = kyivOffline.statusText }
@@ -1105,6 +1136,7 @@ class MainActivity : Activity() {
         if (resultCode != RESULT_OK) return
         val uri = data?.data ?: return
         if (requestCode == 13) cancelRoadDownload()
+        val importVersion = roadDownloadVersion
         workers.execute {
             val result = runCatching {
                 if (requestCode == 13) {
@@ -1120,15 +1152,18 @@ class MainActivity : Activity() {
                         output.toString("UTF-8")
                     }
                     val graph = RoadGraphCodec.read(raw)
-                    val file = android.util.AtomicFile(java.io.File(filesDir, "roads.json"))
-                    val output = file.startWrite()
-                    try {
-                        output.write(raw.toByteArray(Charsets.UTF_8)); file.finishWrite(output)
-                    } catch (failure: Exception) {
-                        file.failWrite(output); throw failure
+                    synchronized(roadDownloadLock) {
+                        check(importVersion == roadDownloadVersion) { "Road import superseded by a newer download" }
+                        val file = android.util.AtomicFile(java.io.File(filesDir, "roads.json"))
+                        val output = file.startWrite()
+                        try {
+                            output.write(raw.toByteArray(Charsets.UTF_8)); file.finishWrite(output)
+                        } catch (failure: Exception) {
+                            file.failWrite(output); throw failure
+                        }
                     }
                     handler.post {
-                        if (!isDestroyed) {
+                        if (!isDestroyed && importVersion == roadDownloadVersion) {
                             roadGraph = graph; resetPrediction(); render(); refreshRoadStatus(); toast("Offline road graph imported")
                         }
                     }

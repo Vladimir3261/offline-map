@@ -96,29 +96,29 @@ object OsmRoadGraph {
             val incoming = from.flatMap { byWay[it].orEmpty() }
             val destination = to.flatMap { byWay[it].orEmpty() }.toSet()
             for (restriction in restrictions) {
-            if (viaNodes.size == 1 && viaWays.isEmpty()) {
-                val via = indices[viaNodes.single()] ?: continue
-                for (edge in incoming.filter { it.to == via }) {
-                    for (next in outgoing[via].orEmpty()) {
-                        val onTargetWay = next in destination
-                        val kind = restriction.substringBefore('@').trim()
-                        val matches = when {
-                            from == to && kind.endsWith("u_turn") -> onTargetWay && next.to == edge.from
-                            from == to && kind.endsWith("straight_on") -> onTargetWay && next.to != edge.from
-                            else -> onTargetWay
+                if (viaNodes.size == 1 && viaWays.isEmpty()) {
+                    val via = indices[viaNodes.single()] ?: continue
+                    for (edge in incoming.filter { it.to == via }) {
+                        for (next in outgoing[via].orEmpty()) {
+                            val onTargetWay = next in destination
+                            val kind = restriction.substringBefore('@').trim()
+                            val matches = when {
+                                from == to && kind.endsWith("u_turn") -> onTargetWay && next.to == edge.from
+                                from == to && kind.endsWith("straight_on") -> onTargetWay && next.to != edge.from
+                                else -> onTargetWay
+                            }
+                            if (if (restriction.startsWith("only_")) !matches else if (restriction.startsWith("no_")) matches else true)
+                                blocked += RoadTurn(edge, next)
                         }
-                        if (if (restriction.startsWith("only_")) !matches else if (restriction.startsWith("no_")) matches else true)
-                            blocked += RoadTurn(edge, next)
+                    }
+                } else {
+                    // Via-way/unknown forms need path history. Conservatively block entry to those via
+                    // ways (or every exit if unresolved), rather than silently dropping the restriction.
+                    val viaEdges = viaWays.flatMap { byWay[it].orEmpty() }.toSet()
+                    for (edge in incoming) for (next in outgoing[edge.to].orEmpty()) {
+                        if (!restriction.startsWith("no_") || viaEdges.isEmpty() || next in viaEdges) blocked += RoadTurn(edge, next)
                     }
                 }
-            } else {
-                // Via-way/unknown forms need path history. Conservatively block entry to those via
-                // ways (or every exit if unresolved), rather than silently dropping the restriction.
-                val viaEdges = viaWays.flatMap { byWay[it].orEmpty() }.toSet()
-                for (edge in incoming) for (next in outgoing[edge.to].orEmpty()) {
-                    if (!restriction.startsWith("no_") || viaEdges.isEmpty() || next in viaEdges) blocked += RoadTurn(edge, next)
-                }
-            }
             }
             require(blocked.size <= 200000) { "Too many road restrictions. Select a shorter route." }
         }

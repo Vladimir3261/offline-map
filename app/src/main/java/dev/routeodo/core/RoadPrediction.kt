@@ -15,24 +15,36 @@ class RoadGraph(
     val coverage: RoadCoverage? = null, val downloadedAtMillis: Long? = null,
 ) {
     val outgoing = edges.groupBy { it.from }
+    private val lengths by lazy { edges.associateWith { Route.distance(nodes[it.from], nodes[it.to]) } }
+    private val headings by lazy { edges.associateWith { Route.bearing(nodes[it.from], nodes[it.to]) } }
     init {
         require(nodes.size in 2..50000 && edges.size in 1..100000)
-        require(edges.all { it.from in nodes.indices && it.to in nodes.indices && length(it) > 0.1 })
+        require(edges.all { it.from in nodes.indices && it.to in nodes.indices })
+        require(edges.all { length(it) > 0.1 })
         val known = edges.toHashSet()
         require(blockedTurns.size <= 200000 && blockedTurns.all {
             it.incoming in known && it.outgoing in known && it.incoming.to == it.outgoing.from
         })
     }
     fun successors(edge: RoadEdge) = outgoing[edge.to].orEmpty().filter { RoadTurn(edge, it) !in blockedTurns }
-    fun length(e: RoadEdge) = Route.distance(nodes[e.from], nodes[e.to])
-    fun heading(e: RoadEdge) = Route.bearing(nodes[e.from], nodes[e.to])
+    fun length(e: RoadEdge) = lengths.getValue(e)
+    fun heading(e: RoadEdge) = headings.getValue(e)
+    fun project(edge: RoadEdge, point: Coordinate): RouteProjection {
+        val a = nodes[edge.from]; val b = nodes[edge.to]
+        val longitudeScale = 111_195.0 * cos(Math.toRadians(point.latitude))
+        fun x(p: Coordinate) = signedAngle(point.longitude, p.longitude) * longitudeScale
+        fun y(p: Coordinate) = (p.latitude - point.latitude) * 111_195
+        val ax = x(a); val ay = y(a); val dx = x(b) - ax; val dy = y(b) - ay
+        val squared = dx*dx + dy*dy
+        val t = if (squared > 0) (-(ax*dx + ay*dy) / squared).coerceIn(0.0,1.0) else 0.0
+        return RouteProjection(length(edge) * t, hypot(ax + t*dx, ay + t*dy))
+    }
     fun position(h: RoadHypothesis) = Route("edge", "", listOf(nodes[h.edge.from], nodes[h.edge.to]), emptyList()).position(h.meters)
 
     /** Dijkstra over incoming edges retains turn restrictions and projected destinations. */
     fun route(h: RoadHypothesis, destination: Coordinate): Route? {
         val targets = edges.map { edge ->
-            val line = Route("target", "", listOf(nodes[edge.from], nodes[edge.to]), emptyList())
-            val projection = line.project(destination).first()
+            val projection = project(edge, destination)
             Triple(edge, projection.progressMeters, projection.distanceFromRouteMeters)
         }
         val nearest = targets.minOf { it.third }
@@ -95,8 +107,7 @@ class RoadPredictor(private val graph: RoadGraph, start: Coordinate, bearing: Do
     private val initialBearing = bearing
     private var yaw = 0.0
     private var hypotheses = graph.edges.mapNotNull { edge ->
-        val line = Route("seed", "", listOf(graph.nodes[edge.from], graph.nodes[edge.to]), emptyList())
-        val projection = line.project(start).first()
+        val projection = graph.project(edge, start)
         if (projection.distanceFromRouteMeters > 50 || abs(signedAngle(bearing, graph.heading(edge))) > 60) null
         else RoadHypothesis(edge, projection.progressMeters, projection.distanceFromRouteMeters / 10 + abs(signedAngle(bearing, graph.heading(edge))) / 30)
     }.sortedBy { it.error }.take(12)
